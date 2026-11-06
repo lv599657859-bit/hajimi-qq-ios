@@ -1,0 +1,69 @@
+name: Build HajimiQQ iOS IPA
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    name: Build Unsigned Device IPA
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install XcodeGen & Generate Project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build for iOS Device (Unsigned ARM64)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project HajimiQQ.xcodeproj \
+            -scheme HajimiQQ \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedDataDevice \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build-device.log
+
+      - name: Package Unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="build/DerivedDataDevice/Build/Products/Release-iphoneos/HajimiQQ.app"
+          test -d "$APP"
+          rm -rf build/ipa
+          mkdir -p build/ipa/Payload
+          cp -R "$APP" build/ipa/Payload/
+          cd build/ipa
+          zip -qry ../HajimiQQ-unsigned.ipa Payload
+          cd ../..
+          ls -lh build/HajimiQQ-unsigned.ipa
+
+      - name: Upload Unsigned IPA Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HajimiQQ-unsigned-ipa
+          path: build/HajimiQQ-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build-device.log
+          if-no-files-found: warn
