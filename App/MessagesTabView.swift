@@ -84,16 +84,32 @@ struct MessagesTabView: View {
             .overlay(Circle().stroke(Color.white.opacity(0.85), lineWidth: 1.5))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(store.profile.hajimiName) · 消息")
-                    .font(.system(size: 17, weight: .bold))
-                    .foregroundColor(.white)
+                HStack(spacing: 6) {
+                    Text("\(store.profile.hajimiName) · 消息")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundColor(.white)
+                    if store.isConnected {
+                        Text("Lv.\(store.telemetry.bond.level) \(store.telemetry.bond.title)")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Color.white.opacity(0.22))
+                            .foregroundColor(.white)
+                            .clipShape(Capsule())
+                    }
+                }
                 HStack(spacing: 5) {
                     Circle()
                         .fill(store.isConnected ? Color.green : Color.orange)
                         .frame(width: 7, height: 7)
-                    Text(store.isConnected ? "热点 / Wi-Fi 在线直连" : "等待连接电脑 DSH")
-                        .font(.system(size: 11.5))
-                        .foregroundColor(.white.opacity(0.92))
+                    Text(
+                        store.isConnected
+                            ? "\(store.telemetry.circadian.emoji) \(store.telemetry.circadian.label) · \(store.telemetry.pad.moodEmoji)\(store.telemetry.pad.moodLabel)"
+                            : "等待连接电脑 DSH"
+                    )
+                    .font(.system(size: 11.5))
+                    .foregroundColor(.white.opacity(0.92))
+                    .lineLimit(1)
                 }
             }
 
@@ -162,11 +178,11 @@ struct MessagesTabView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 if !store.evolution.mindFlowActivity.isEmpty {
-                    HStack(alignment: .top, spacing: 8) {
+                    HStack(alignment: .center, spacing: 8) {
                         Text("🌊")
                             .font(.system(size: 14))
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("\(store.profile.hajimiName)的此刻心流")
+                            Text("\(store.profile.hajimiName)的此刻心流 · 🐟饱腹\(store.telemetry.vitals.satiety)%")
                                 .font(.system(size: 11, weight: .bold))
                                 .foregroundColor(.purple)
                             Text(store.evolution.mindFlowActivity)
@@ -174,7 +190,19 @@ struct MessagesTabView: View {
                                 .foregroundColor(.primary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                        Spacer()
+                        Spacer(minLength: 4)
+                        Button {
+                            Task { await store.interactWithCatgirl(action: "headpat") }
+                        } label: {
+                            Text("🐾 摸头")
+                                .font(.system(size: 11.5, weight: .bold))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(Color.pink.opacity(0.16))
+                                .foregroundColor(.pink)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)

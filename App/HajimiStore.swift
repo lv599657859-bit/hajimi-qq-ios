@@ -22,13 +22,17 @@ final class HajimiStore: ObservableObject {
     @Published var providers: [ProviderCatalogEntry] = []
     @Published var memories: [SharedMemoryEntry] = []
     @Published var evolution: PersonaEvolutionState = PersonaEvolutionState()
+    @Published var telemetry: SoulTelemetry = SoulTelemetry()
+    @Published var diaryEntries: [CatgirlDiaryEntry] = []
     @Published var reactionsByMsgId: [String: [String]] = [:]
     @Published var toastMessage: String = ""
 
     var activeViewingSessionId: String? = nil
     var bootstrapFallbackUrls: [String] = []
+    private var didFinishBootstrap: Bool = false
     private var sseTask: Task<Void, Never>? = nil
     private var toastTask: Task<Void, Never>? = nil
+    private var liveClearTasks: [String: Task<Void, Never>] = [:]
 
     private let serverKey = "hjm_server_url_v2"
     private let authKey = "hjm_pair_key_v2"
@@ -82,15 +86,15 @@ final class HajimiStore: ObservableObject {
     }
 
     var hajimiAvatarFullUrl: String {
-        "\(serverUrl)/assets/hajimi-avatar.png?v=\(profile.avatarRev)"
+        serverUrl.isEmpty ? "" : "\(serverUrl)/assets/hajimi-avatar.png?v=\(profile.avatarRev)"
     }
 
     var ownerAvatarFullUrl: String {
-        "\(serverUrl)/assets/owner-avatar.png?v=\(profile.avatarRev)"
+        serverUrl.isEmpty ? "" : "\(serverUrl)/assets/owner-avatar.png?v=\(profile.avatarRev)"
     }
 
     var portraitFullUrl: String {
-        "\(serverUrl)/assets/hajimi-full.jpg?v=\(profile.avatarRev)"
+        serverUrl.isEmpty ? "" : "\(serverUrl)/assets/hajimi-full.jpg?v=\(profile.avatarRev)"
     }
 
     func attachmentUrl(sessionId: String, attachmentId: String) -> String {
@@ -128,6 +132,7 @@ final class HajimiStore: ObservableObject {
     }
 
     func bootstrap() async {
+        defer { didFinishBootstrap = true }
         if serverUrl.isEmpty {
             await autoScanLanServer(silent: true)
         }
@@ -137,6 +142,15 @@ final class HajimiStore: ObservableObject {
             await autoScanLanServer(silent: true)
         }
         startSseLoop()
+    }
+
+    func handleAppDidBecomeActive() async {
+        guard didFinishBootstrap, !serverUrl.isEmpty, !pairKey.isEmpty else { return }
+        startSseLoop()
+        await refreshAll()
+        if let activeSid = activeViewingSessionId {
+            await loadHistory(sessionId: activeSid)
+        }
     }
 
     func pairWithPin(url: String, code: String) async -> Bool {
@@ -222,29 +236,40 @@ final class HajimiStore: ObservableObject {
     }
 
     private static func probeCandidateList(_ urls: [String], timeout: TimeInterval) async -> String? {
-        await withTaskGroup(of: String?.self) { group -> String? in
-            for candidate in urls {
-                group.addTask {
-                    guard let u = URL(string: "\(candidate)/api/ios/ping") else { return nil }
-                    var req = URLRequest(url: u)
-                    req.timeoutInterval = timeout
-                    if let (data, resp) = try? await URLSession.shared.data(for: req),
-                       let http = resp as? HTTPURLResponse, http.statusCode == 200,
-                       let str = String(data: data, encoding: .utf8),
-                       str.contains("hajimi-ios-link") {
-                        return candidate
+        let batchSize = 48
+        var idx = 0
+        while idx < urls.count {
+            let end = min(idx + batchSize, urls.count)
+            let chunk = Array(urls[idx..<end])
+            let hit = await withTaskGroup(of: String?.self) { group -> String? in
+                for candidate in chunk {
+                    group.addTask {
+                        guard let u = URL(string: "\(candidate)/api/ios/ping") else { return nil }
+                        var req = URLRequest(url: u)
+                        req.timeoutInterval = timeout
+                        if let (data, resp) = try? await URLSession.shared.data(for: req),
+                           let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                           let str = String(data: data, encoding: .utf8),
+                           str.contains("hajimi-ios-link") {
+                            return candidate
+                        }
+                        return nil
                     }
-                    return nil
                 }
-            }
-            for await res in group {
-                if let hit = res {
-                    group.cancelAll()
-                    return hit
+                for await res in group {
+                    if let found = res {
+                        group.cancelAll()
+                        return found
+                    }
                 }
+                return nil
             }
-            return nil
+            if let hit = hit {
+                return hit
+            }
+            idx = end
         }
+        return nil
     }
 
     private static func localIPv4Prefixes() -> [String] {
@@ -254,12 +279,17 @@ final class HajimiStore: ObservableObject {
             defer { freeifaddrs(ifaddr) }
             var ptr: UnsafeMutablePointer<ifaddrs>? = first
             while let cur = ptr {
-                let name = String(cString: cur.pointee.ifa_name)
+                defer { ptr = cur.pointee.ifa_next }
+                guard let namePtr = cur.pointee.ifa_name,
+                      let addrPtr = cur.pointee.ifa_addr else {
+                    continue
+                }
+                let name = String(cString: namePtr)
                 if !name.hasPrefix("pdp_ip") && !name.hasPrefix("utun") && !name.hasPrefix("ipsec") {
-                    let addr = cur.pointee.ifa_addr.pointee
+                    let addr = addrPtr.pointee
                     if addr.sa_family == UInt8(AF_INET) {
                         var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                        if getnameinfo(cur.pointee.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                        if getnameinfo(addrPtr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
                             let ip = String(cString: hostname)
                             if !ip.hasPrefix("127.") && !ip.hasPrefix("169.254.") {
                                 let parts = ip.split(separator: ".")
@@ -277,7 +307,6 @@ final class HajimiStore: ObservableObject {
                         }
                     }
                 }
-                ptr = cur.pointee.ifa_next
             }
         }
         if !result.contains("172.20.10") {
@@ -286,13 +315,13 @@ final class HajimiStore: ObservableObject {
         return result
     }
 
-    private func authedRequest(path: String, method: String = "GET", jsonBody: [String: Any]? = nil) throws -> URLRequest {
+    private func authedRequest(path: String, method: String = "GET", jsonBody: [String: Any]? = nil, timeout: TimeInterval = 20) throws -> URLRequest {
         guard !serverUrl.isEmpty, let url = URL(string: "\(serverUrl)\(path)") else {
             throw URLError(.badURL)
         }
         var req = URLRequest(url: url)
         req.httpMethod = method
-        req.timeoutInterval = 20
+        req.timeoutInterval = timeout
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         if !pairKey.isEmpty {
             req.setValue(pairKey, forHTTPHeaderField: "x-hajimi-key")
@@ -304,12 +333,29 @@ final class HajimiStore: ObservableObject {
         return req
     }
 
+    private func authedData(path: String, method: String = "GET", jsonBody: [String: Any]? = nil, timeout: TimeInterval = 20) async throws -> Data {
+        let req = try authedRequest(path: path, method: method, jsonBody: jsonBody, timeout: timeout)
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        if http.statusCode == 401 {
+            self.isConnected = false
+            throw URLError(.userAuthenticationRequired)
+        }
+        guard (200...299).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        return data
+    }
+
     func refreshAll() async {
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.loadOverview() }
             group.addTask { await self.loadModels() }
             group.addTask { await self.loadMemories() }
             group.addTask { await self.loadEvolution() }
+            group.addTask { await self.loadSoulState() }
         }
     }
 
@@ -321,6 +367,7 @@ final class HajimiStore: ObservableObject {
                 let decoded = try JSONDecoder().decode(OverviewResponse.self, from: data)
                 self.isConnected = true
                 if let prof = decoded.profile { self.profile = prof }
+                if let tel = decoded.telemetry { self.telemetry = tel }
                 if let en = decoded.enabledSessions { self.enabledSessions = en }
                 if let ot = decoded.otherSessions { self.otherSessions = ot }
             } else if let http = resp as? HTTPURLResponse, http.statusCode == 401 {
@@ -329,6 +376,19 @@ final class HajimiStore: ObservableObject {
         } catch {
             self.isConnected = false
         }
+    }
+
+    func loadSoulState() async {
+        do {
+            let req = try authedRequest(path: "/api/ios/soul/state")
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
+                let decoded = try JSONDecoder().decode(SoulStateResponse.self, from: data)
+                if let tel = decoded.telemetry { self.telemetry = tel }
+                if let entries = decoded.diaryEntries { self.diaryEntries = entries }
+                if let ev = decoded.evolution { self.evolution = ev }
+            }
+        } catch {}
     }
 
     func loadHistory(sessionId: String) async {
@@ -391,7 +451,7 @@ final class HajimiStore: ObservableObject {
         }
 
         do {
-            let req = try authedRequest(
+            _ = try await authedData(
                 path: "/api/ios/send",
                 method: "POST",
                 jsonBody: [
@@ -400,10 +460,9 @@ final class HajimiStore: ObservableObject {
                     "images": encodedImages
                 ]
             )
-            _ = try await URLSession.shared.data(for: req)
         } catch {
             liveBySession.removeValue(forKey: sessionId)
-            showToast("发送失败，请检查 Wi-Fi 连接")
+            showToast("发送失败，请检查热点 / Wi-Fi 连接")
         }
     }
 
@@ -514,15 +573,103 @@ final class HajimiStore: ObservableObject {
         } catch {}
     }
 
+    func reinforceMemory(id: String) async {
+        HapticsHelper.lightTap()
+        do {
+            let data = try await authedData(path: "/api/ios/memories/reinforce", method: "POST", jsonBody: ["id": id])
+            if let dec = try? JSONDecoder().decode(MemoriesResponse.self, from: data), let m = dec.memories {
+                self.memories = m
+            } else {
+                await loadMemories()
+            }
+            showToast("⚡ 已强化唤醒这颗记忆星辰！")
+        } catch {
+            showToast("强化记忆未生效（请确认电脑端已升级至 v3.0）")
+        }
+    }
+
+    func togglePinMemory(id: String) async {
+        HapticsHelper.lightTap()
+        do {
+            let data = try await authedData(path: "/api/ios/memories/toggle-pin", method: "POST", jsonBody: ["id": id])
+            if let dec = try? JSONDecoder().decode(MemoriesResponse.self, from: data), let m = dec.memories {
+                self.memories = m
+            } else {
+                await loadMemories()
+            }
+            showToast("📌 已切换记忆星辰置顶状态")
+        } catch {
+            showToast("置顶切换未生效（请确认电脑端已升级至 v3.0）")
+        }
+    }
+
+    // MARK: - SoulOS v3.0 Catgirl Care & Autonomous Heartbeat
+    func interactWithCatgirl(action: String) async {
+        HapticsHelper.care(action: action)
+        do {
+            let data = try await authedData(path: "/api/ios/soul/interact", method: "POST", jsonBody: ["action": action])
+            if let dec = try? JSONDecoder().decode(SoulInteractResponse.self, from: data), dec.ok == true {
+                if let tel = dec.telemetry { self.telemetry = tel }
+                if let ev = dec.evolution { self.evolution = ev }
+                if let toast = dec.reactionToast, !toast.isEmpty {
+                    showToast(toast)
+                }
+            } else {
+                await loadSoulState()
+            }
+        } catch {
+            showToast("互动未送达，请确认电脑端已连接并升级至 v3.0")
+        }
+    }
+
+    func updateHeartbeatConfig(proactiveEnabled: Bool? = nil, minIdleMinutes: Int? = nil, autoExpandThoughts: Bool? = nil) async {
+        // Optimistic update to prevent iOS 17 Toggle/Picker bounce
+        var body: [String: Any] = [:]
+        if let p = proactiveEnabled {
+            self.telemetry.heartbeat.proactiveEnabled = p
+            body["proactiveEnabled"] = p
+        }
+        if let m = minIdleMinutes {
+            self.telemetry.heartbeat.minIdleMinutes = m
+            body["minIdleMinutes"] = m
+        }
+        if let a = autoExpandThoughts {
+            self.telemetry.heartbeat.autoExpandThoughts = a
+            body["autoExpandThoughts"] = a
+        }
+        do {
+            let data = try await authedData(path: "/api/ios/soul/heartbeat-config", method: "POST", jsonBody: body)
+            if let dec = try? JSONDecoder().decode(SoulInteractResponse.self, from: data), let tel = dec.telemetry {
+                self.telemetry = tel
+            } else {
+                await loadSoulState()
+            }
+        } catch {}
+    }
+
+    func triggerProactiveGreetingNow(sessionId: String? = nil) async {
+        HapticsHelper.lightTap()
+        var body: [String: Any] = [:]
+        if let sid = sessionId, !sid.isEmpty { body["sessionId"] = sid }
+        do {
+            _ = try await authedData(path: "/api/ios/soul/proactive-now", method: "POST", jsonBody: body)
+            showToast("💌 \(profile.hajimiName)正在组织语言准备主动找你...")
+        } catch {
+            showToast("触发主动私聊失败，请确认电脑端已升级至 v3.0")
+        }
+    }
+
     // MARK: - Persona Evolution
     func updateEvolutionConfig(enabled: Bool, cycleEveryTurns: Int, cycleEveryHours: Int) async {
+        self.evolution.enabled = enabled
+        self.evolution.cycleEveryTurns = cycleEveryTurns
+        self.evolution.cycleEveryHours = cycleEveryHours
         do {
-            let req = try authedRequest(path: "/api/ios/evolution/config", method: "POST", jsonBody: [
+            let data = try await authedData(path: "/api/ios/evolution/config", method: "POST", jsonBody: [
                 "enabled": enabled,
                 "cycleEveryTurns": cycleEveryTurns,
                 "cycleEveryHours": cycleEveryHours
             ])
-            let (data, _) = try await URLSession.shared.data(for: req)
             if let dec = try? JSONDecoder().decode(EvolutionResponse.self, from: data), let ev = dec.evolution {
                 self.evolution = ev
             }
@@ -539,23 +686,28 @@ final class HajimiStore: ObservableObject {
             if let dec = try? JSONDecoder().decode(EvolutionResponse.self, from: data), let ev = dec.evolution {
                 self.evolution = ev
                 await loadMemories()
-                showToast("✨ 人设已完成一次轻微演化！")
+                await loadSoulState()
+                showToast("✨ 人设已完成一次演化并写入秘密日记！")
             }
         } catch {
             showToast("人设微调失败")
         }
     }
 
-    func updateLivingTraits(currentVibe: String, traits: [String]) async {
+    func updateLivingTraits(currentVibe: String, traits: [String], selfOptimizeRules: [String]? = nil) async {
+        var body: [String: Any] = [
+            "currentVibe": currentVibe,
+            "livingTraits": traits
+        ]
+        if let rules = selfOptimizeRules {
+            body["selfOptimizeRules"] = rules
+        }
         do {
-            let req = try authedRequest(path: "/api/ios/evolution/update-traits", method: "POST", jsonBody: [
-                "currentVibe": currentVibe,
-                "livingTraits": traits
-            ])
+            let req = try authedRequest(path: "/api/ios/evolution/update-traits", method: "POST", jsonBody: body)
             let (data, _) = try await URLSession.shared.data(for: req)
             if let dec = try? JSONDecoder().decode(EvolutionResponse.self, from: data), let ev = dec.evolution {
                 self.evolution = ev
-                showToast("已更新设定细节")
+                showToast("已更新设定与自我进化准则")
             }
         } catch {}
     }
@@ -641,8 +793,11 @@ final class HajimiStore: ObservableObject {
                             } else if line.hasPrefix("data:") {
                                 let jsonStr = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
                                 await self.handleSseFrame(event: currentEvent, jsonString: jsonStr)
+                                currentEvent = "message"
                             }
                         }
+                    } else {
+                        await MainActor.run { self.isConnected = false }
                     }
                 } catch {
                     consecutiveFailures += 1
@@ -658,6 +813,15 @@ final class HajimiStore: ObservableObject {
         }
     }
 
+    private static func sanitizeLiveStreamingText(_ raw: String) -> String {
+        var s = raw
+        s = s.replacingOccurrences(of: #"<hajimi_thought[^>]*>[\s\S]*?<\/hajimi_thought>"#, with: "", options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: #"<hajimi_memory[^>]*>[\s\S]*?<\/hajimi_memory>"#, with: "", options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: #"<\/?hajimi_[a-zA-Z0-9_]*[\s\S]*$"#, with: "", options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: #"<\/?(?:h(?:a(?:j(?:i(?:m(?:i)?)?)?)?)?)?$"#, with: "", options: [.regularExpression, .caseInsensitive])
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func handleSseFrame(event: String, jsonString: String) async {
         guard let data = jsonString.data(using: .utf8) else { return }
         if event == "live" {
@@ -665,9 +829,26 @@ final class HajimiStore: ObservableObject {
                let sid = obj["sessionId"] as? String {
                 let done = (obj["done"] as? Bool) ?? false
                 if done {
-                    liveBySession.removeValue(forKey: sid)
+                    if let cur = liveBySession[sid], !cur.text.isEmpty {
+                        // Zero-flicker handoff: hold text briefly until `sync` atomically swaps in final message
+                        liveBySession[sid] = LiveStreamingStatus(text: cur.text, toolStatus: "")
+                        liveClearTasks[sid]?.cancel()
+                        liveClearTasks[sid] = Task { [weak self] in
+                            try? await Task.sleep(nanoseconds: 550_000_000)
+                            guard !Task.isCancelled else { return }
+                            self?.liveBySession.removeValue(forKey: sid)
+                            self?.liveClearTasks.removeValue(forKey: sid)
+                        }
+                    } else {
+                        liveClearTasks[sid]?.cancel()
+                        liveClearTasks.removeValue(forKey: sid)
+                        liveBySession.removeValue(forKey: sid)
+                    }
                 } else {
-                    let txt = (obj["text"] as? String) ?? ""
+                    liveClearTasks[sid]?.cancel()
+                    liveClearTasks.removeValue(forKey: sid)
+                    let rawTxt = (obj["text"] as? String) ?? ""
+                    let txt = Self.sanitizeLiveStreamingText(rawTxt)
                     let tool = (obj["toolStatus"] as? String) ?? ""
                     liveBySession[sid] = LiveStreamingStatus(text: txt, toolStatus: tool)
                 }
@@ -675,6 +856,7 @@ final class HajimiStore: ObservableObject {
         } else if event == "sync" {
             if let ov = try? JSONDecoder().decode(OverviewResponse.self, from: data) {
                 if let prof = ov.profile { self.profile = prof }
+                if let tel = ov.telemetry { self.telemetry = tel }
                 if let en = ov.enabledSessions { self.enabledSessions = en }
                 if let ot = ov.otherSessions { self.otherSessions = ot }
             }
@@ -683,6 +865,8 @@ final class HajimiStore: ObservableObject {
                let msgsArr = obj["messages"],
                let msgsData = try? JSONSerialization.data(withJSONObject: msgsArr),
                let decodedMsgs = try? JSONDecoder().decode([ChatMessageItem].self, from: msgsData) {
+                liveClearTasks[sid]?.cancel()
+                liveClearTasks.removeValue(forKey: sid)
                 messagesBySession[sid] = decodedMsgs
                 liveBySession.removeValue(forKey: sid)
                 if activeViewingSessionId != sid, (obj["newAssistantReply"] as? Bool) == true {
@@ -692,6 +876,7 @@ final class HajimiStore: ObservableObject {
         } else if event == "soul" {
             await loadMemories()
             await loadEvolution()
+            await loadSoulState()
             await loadOverview()
         }
     }

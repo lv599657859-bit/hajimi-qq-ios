@@ -248,9 +248,14 @@ struct ProfileSettingsTabView: View {
                     onConfirm: { croppedJpeg in
                         let b64 = croppedJpeg.base64EncodedString()
                         let field = job.field
+                        let hName = hajimiNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let oName = ownerNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
                         activeCropJob = nil
                         Task {
-                            await store.updateProfile([field: b64])
+                            var payload: [String: Any] = [field: b64]
+                            if !hName.isEmpty { payload["hajimiName"] = hName }
+                            payload["ownerName"] = oName
+                            await store.updateProfile(payload)
                         }
                     },
                     onCancel: {

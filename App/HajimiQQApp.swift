@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct HajimiQQApp: App {
     @StateObject private var store = HajimiStore()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -10,6 +11,13 @@ struct HajimiQQApp: App {
                 .environmentObject(store)
                 .task {
                     await store.bootstrap()
+                }
+                .onChange(of: scenePhase) { _, newPhase in
+                    if newPhase == .active {
+                        Task {
+                            await store.handleAppDidBecomeActive()
+                        }
+                    }
                 }
         }
     }
@@ -33,7 +41,7 @@ struct RootMainTabView: View {
 
                 SoulMemoryTabView()
                     .tabItem {
-                        Label("记忆与演化", systemImage: "brain.head.profile")
+                        Label("生命与星海", systemImage: "sparkles")
                     }
 
                 ProfileSettingsTabView()

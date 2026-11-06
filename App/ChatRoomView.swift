@@ -22,6 +22,8 @@ struct ChatRoomView: View {
     @State private var viewingImageItem: PreviewImageItem? = nil
     @State private var didInitialScroll: Bool = false
     @State private var historyLoadSeq: Int = 0
+    @State private var thoughtScrollTick: Int = 0
+    @State private var manuallyToggledThoughtIds: Set<String> = []
     @FocusState private var isInputFocused: Bool
 
     private var session: SessionCard {
@@ -295,6 +297,9 @@ struct ChatRoomView: View {
             .onChange(of: liveStatus?.text) { _, _ in
                 scrollToBottom(proxy, animated: false)
             }
+            .onChange(of: thoughtScrollTick) { _, _ in
+                scrollToBottom(proxy, animated: true)
+            }
             .onChange(of: isInputFocused) { _, focused in
                 if focused {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
@@ -358,14 +363,70 @@ struct ChatRoomView: View {
                 ownerAvatarView
             }
         } else {
+            let hasThought = !msg.innerThought.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let showThought = hasThought && isThoughtExpanded(msg.id)
             HStack(alignment: .top, spacing: 9) {
                 peerAvatarView(animId: msg.id)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(peerDisplayName)
-                        .font(.system(size: 11.5))
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 4)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(peerDisplayName)
+                            .font(.system(size: 11.5))
+                            .foregroundColor(.secondary)
+                            .padding(.leading, 4)
+
+                        if hasThought {
+                            Button {
+                                HapticsHelper.lightTap()
+                                withAnimation(.spring(response: 0.24, dampingFraction: 0.8)) {
+                                    toggleThoughtVisibility(msg.id)
+                                }
+                                if msg.id == messages.last?.id && isThoughtExpanded(msg.id) {
+                                    thoughtScrollTick &+= 1
+                                }
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Text("💭")
+                                        .font(.system(size: 10))
+                                    Text(showThought ? "收起心声" : "偷看心声")
+                                        .font(.system(size: 10.5, weight: .semibold))
+                                }
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color.purple.opacity(showThought ? 0.20 : 0.11))
+                                .foregroundColor(.purple)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    if showThought {
+                        HStack(alignment: .top, spacing: 6) {
+                            Text("🐾")
+                                .font(.system(size: 12))
+                            Text(msg.innerThought)
+                                .font(.system(size: 12.5))
+                                .foregroundColor(Color.purple.opacity(0.92))
+                                .italic()
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 7)
+                        .background(
+                            LinearGradient(
+                                colors: [Color.purple.opacity(0.09), Color.pink.opacity(0.08)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 11)
+                                .stroke(Color.purple.opacity(0.22), lineWidth: 0.8)
+                        )
+                        .cornerRadius(11)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topLeading)))
+                    }
 
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(msg.images) { im in
@@ -393,6 +454,20 @@ struct ChatRoomView: View {
         }
     }
 
+    private func isThoughtExpanded(_ msgId: String) -> Bool {
+        let defaultOpen = store.telemetry.heartbeat.autoExpandThoughts
+        let toggled = manuallyToggledThoughtIds.contains(msgId)
+        return defaultOpen ? !toggled : toggled
+    }
+
+    private func toggleThoughtVisibility(_ msgId: String) {
+        if manuallyToggledThoughtIds.contains(msgId) {
+            manuallyToggledThoughtIds.remove(msgId)
+        } else {
+            manuallyToggledThoughtIds.insert(msgId)
+        }
+    }
+
     @ViewBuilder
     private func bubbleContextMenuItems(_ msg: ChatMessageItem) -> some View {
         if msg.id != "live-streaming" {
@@ -413,10 +488,10 @@ struct ChatRoomView: View {
             if !msg.text.isEmpty {
                 Button {
                     Task {
-                        await store.saveMemory(content: msg.text, category: "memory", pinned: false)
+                        await store.saveMemory(content: msg.text, category: "episodic", pinned: false)
                     }
                 } label: {
-                    Label("存入跨会话共享记忆", systemImage: "brain.head.profile")
+                    Label("存入跨会话记忆星海", systemImage: "sparkles")
                 }
 
                 Button {
@@ -613,7 +688,9 @@ struct ChatRoomView: View {
                                         .frame(width: 56, height: 56)
                                         .clipShape(RoundedRectangle(cornerRadius: 8))
                                     Button {
-                                        pendingImageData.remove(at: idx)
+                                        if pendingImageData.indices.contains(idx) {
+                                            pendingImageData.remove(at: idx)
+                                        }
                                     } label: {
                                         Image(systemName: "xmark.circle.fill")
                                             .foregroundStyle(.white, .red)
@@ -691,14 +768,22 @@ struct ChatRoomView: View {
                         showQuickTasks = false
                         Task { await store.triggerPoke(session: session) }
                     }
+                    quickActionBtn("🐟 投喂小鱼干") {
+                        showQuickTasks = false
+                        Task { await store.interactWithCatgirl(action: "feed_fish") }
+                    }
+                    quickActionBtn("🐾 摸摸头顺毛") {
+                        showQuickTasks = false
+                        Task { await store.interactWithCatgirl(action: "headpat") }
+                    }
                     quickActionBtn("📂 查工作区改动") {
                         sendQuick("帮我看一下当前工作区 git status 和最近修改了哪些文件，简短汇报结论")
                     }
                     quickActionBtn("🔍 汇报任务进度") {
                         sendQuick("帮我检查当前进行中的任务进度，有问题直接直白告诉我")
                     }
-                    quickActionBtn("🧠 记住刚才说的") {
-                        sendQuick("把我们刚才聊到的重要偏好和约定记进你的共享记忆里")
+                    quickActionBtn("🌌 记入星海记忆") {
+                        sendQuick("把我们刚才聊到的重要偏好和约定记进你的共享记忆星海里")
                     }
                 }
                 .padding(.horizontal, 10)
@@ -844,6 +929,28 @@ struct PortraitMoodSheet: View {
                     .cornerRadius(10)
                 }
 
+                HStack(spacing: 8) {
+                    Text("\(store.telemetry.circadian.emoji) \(store.telemetry.circadian.label)")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(.indigo)
+                    Text("·")
+                        .foregroundColor(.secondary)
+                    Text("🐟 饱腹 \(store.telemetry.vitals.satiety)%")
+                        .font(.system(size: 11.5, weight: .medium))
+                    Text("·")
+                        .foregroundColor(.secondary)
+                    Text("⚡ 精力 \(store.telemetry.vitals.energy)%")
+                        .font(.system(size: 11.5, weight: .medium))
+                    Spacer()
+                    Text("Lv.\(store.telemetry.bond.level) \(store.telemetry.bond.title)")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.pink)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                .cornerRadius(10)
+
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("\(session.portrait.emoji) \(session.portrait.tag) · \(session.roleBadge)")
@@ -857,16 +964,41 @@ struct PortraitMoodSheet: View {
                         dismiss()
                         Task { await store.triggerPoke(session: session) }
                     }
-                    .font(.system(size: 13.5, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
                     .background(Color.pink)
                     .clipShape(Capsule())
                 }
                 .padding()
                 .background(Color(uiColor: .secondarySystemGroupedBackground))
                 .cornerRadius(14)
+
+                HStack(spacing: 10) {
+                    Button {
+                        Task { await store.interactWithCatgirl(action: "feed_fish") }
+                    } label: {
+                        Text("🐟 喂小鱼干")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(Color.orange.opacity(0.14))
+                            .foregroundColor(.orange)
+                            .cornerRadius(10)
+                    }
+                    Button {
+                        Task { await store.interactWithCatgirl(action: "headpat") }
+                    } label: {
+                        Text("🐾 摸头顺毛")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 9)
+                            .background(Color.purple.opacity(0.14))
+                            .foregroundColor(.purple)
+                            .cornerRadius(10)
+                    }
+                }
 
                 Spacer()
             }

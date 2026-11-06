@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import CoreHaptics
 
 @MainActor
 final class RemoteImageMemoryCache {
@@ -93,6 +94,100 @@ enum ImageCompressionHelper {
     }
 }
 
+@MainActor
+final class CatgirlHapticsManager {
+    static let shared = CatgirlHapticsManager()
+    private var engine: CHHapticEngine?
+
+    private func ensureEngine() -> CHHapticEngine? {
+        guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return nil }
+        if let existing = engine {
+            try? existing.start()
+            return existing
+        }
+        do {
+            let created = try CHHapticEngine()
+            created.isAutoShutdownEnabled = true
+            created.resetHandler = { [weak self] in
+                Task { @MainActor in
+                    try? self?.engine?.start()
+                }
+            }
+            try created.start()
+            self.engine = created
+            return created
+        } catch {
+            return nil
+        }
+    }
+
+    /// Lifelike feline purring wave for headpats & naps, crispy 3-bite crunch for dried fish treats
+    func playCareHaptic(action: String) {
+        guard let eng = ensureEngine() else {
+            HapticsHelper.poke()
+            return
+        }
+        do {
+            var events: [CHHapticEvent] = []
+            var curves: [CHHapticParameterCurve] = []
+
+            switch action {
+            case "headpat", "nap_rest":
+                // Warm 0.85s purring continuous rumble
+                let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.48)
+                let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.12)
+                events.append(CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharpness], relativeTime: 0, duration: 0.85))
+                curves.append(
+                    CHHapticParameterCurve(
+                        parameterID: .hapticIntensityControl,
+                        controlPoints: [
+                            .init(relativeTime: 0.0, value: 0.25),
+                            .init(relativeTime: 0.28, value: 0.85),
+                            .init(relativeTime: 0.55, value: 0.45),
+                            .init(relativeTime: 0.85, value: 0.15)
+                        ],
+                        relativeTime: 0
+                    )
+                )
+            case "feed_fish":
+                // Three crisp freeze-dried fish crunches + happy tail purr
+                for (i, t) in [0.0, 0.13, 0.27].enumerated() {
+                    let inten = CHHapticEventParameter(parameterID: .hapticIntensity, value: Float(0.68 + Double(i) * 0.08))
+                    let sharp = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.72)
+                    events.append(CHHapticEvent(eventType: .hapticTransient, parameters: [inten, sharp], relativeTime: t))
+                }
+                events.append(
+                    CHHapticEvent(
+                        eventType: .hapticContinuous,
+                        parameters: [
+                            CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.36),
+                            CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.15)
+                        ],
+                        relativeTime: 0.36,
+                        duration: 0.35
+                    )
+                )
+            default:
+                // Playful pounce double-bounce
+                events.append(CHHapticEvent(eventType: .hapticTransient, parameters: [
+                    CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.65),
+                    CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.45)
+                ], relativeTime: 0.0))
+                events.append(CHHapticEvent(eventType: .hapticTransient, parameters: [
+                    CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.88),
+                    CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.62)
+                ], relativeTime: 0.11))
+            }
+
+            let pattern = try CHHapticPattern(events: events, parameterCurves: curves)
+            let player = try eng.makePlayer(with: pattern)
+            try player.start(atTime: CHHapticTimeImmediate)
+        } catch {
+            HapticsHelper.poke()
+        }
+    }
+}
+
 enum HapticsHelper {
     static func poke() {
         let gen = UIImpactFeedbackGenerator(style: .medium)
@@ -101,6 +196,11 @@ enum HapticsHelper {
             let light = UIImpactFeedbackGenerator(style: .rigid)
             light.impactOccurred()
         }
+    }
+
+    @MainActor
+    static func care(action: String) {
+        CatgirlHapticsManager.shared.playCareHaptic(action: action)
     }
 
     static func lightTap() {
