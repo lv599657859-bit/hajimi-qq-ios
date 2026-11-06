@@ -98,9 +98,13 @@ struct ChatRoomView: View {
                                 .font(.system(size: 15, weight: .bold))
                                 .foregroundColor(.primary)
                                 .lineLimit(1)
-                            Text(isBusy ? (liveStatus?.toolStatus.isEmpty == false ? "⚡ \(liveStatus!.toolStatus)" : "💭 正在输入...") : "🟢 在线 · \(session.roleBadge)")
+                            Text(
+                                !store.isConnected
+                                    ? "🔄 正在重连电脑端..."
+                                    : (isBusy ? (liveStatus?.toolStatus.isEmpty == false ? "⚡ \(liveStatus!.toolStatus)" : "💭 正在输入...") : "🟢 在线 · \(session.roleBadge)")
+                            )
                                 .font(.system(size: 10.5))
-                                .foregroundColor(isBusy ? .blue : .secondary)
+                                .foregroundColor(!store.isConnected ? .orange : (isBusy ? .blue : .secondary))
                                 .lineLimit(1)
                         }
                     }
@@ -189,6 +193,25 @@ struct ChatRoomView: View {
                     .foregroundColor(.blue)
                     .clipShape(Capsule())
                 }
+
+                Button {
+                    Task {
+                        await store.forkSession(sessionId: sessionId)
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 10.5, weight: .bold))
+                        Text(store.isForkingSession ? "分叉中..." : "新开分支")
+                            .font(.system(size: 11.5, weight: .semibold))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.purple.opacity(0.13))
+                    .foregroundColor(.purple)
+                    .clipShape(Capsule())
+                }
+                .disabled(store.isForkingSession)
 
                 Divider().frame(height: 14)
 
@@ -483,6 +506,15 @@ struct ChatRoomView: View {
                 quotingMessage = msg
             } label: {
                 Label("引用回复", systemImage: "arrowshape.turn.up.left")
+            }
+
+            Button {
+                let seq = HajimiStore.extractEventSeq(from: msg.id)
+                Task {
+                    await store.forkSession(sessionId: sessionId, atSeq: seq)
+                }
+            } label: {
+                Label("从此处新开分支", systemImage: "arrow.triangle.branch")
             }
 
             if !msg.text.isEmpty {

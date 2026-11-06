@@ -200,6 +200,36 @@ struct ProfileSettingsTabView: View {
                             .font(.system(size: 13.5, weight: .semibold))
                     }
 
+                    Toggle(
+                        isOn: Binding(
+                            get: { store.backgroundKeepAliveEnabled },
+                            set: { store.setBackgroundKeepAlive($0) }
+                        )
+                    ) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("🌙 切后台不断连（静音长驻保活）")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("切去微信/B站或锁屏时保持 DSH 实时连接，不打断音乐与视频")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Toggle(
+                        isOn: Binding(
+                            get: { store.backgroundNotifyEnabled },
+                            set: { store.setBackgroundNotify($0) }
+                        )
+                    ) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("🔔 后台收到回复弹锁屏横幅")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("哈基米在后台回复或完成干活任务时立即弹出系统通知")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
                     TextField("http://172.20.10.x:19390 或 Wi-Fi 地址", text: $serverUrlDraft)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -229,7 +259,7 @@ struct ProfileSettingsTabView: View {
                                 } else {
                                     store.saveConnection(url: serverUrlDraft)
                                     await store.refreshAll()
-                                    store.startSseLoop()
+                                    store.startSseLoop(force: true)
                                     store.showToast("连接地址已保存")
                                 }
                             }

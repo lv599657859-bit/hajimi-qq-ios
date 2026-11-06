@@ -23,6 +23,12 @@ struct MessagesTabView: View {
                 ChatRoomView(sessionId: sid)
                     .id(sid)
             }
+            .onChange(of: store.pendingOpenSessionId) { _, targetSid in
+                guard let targetSid = targetSid, !targetSid.isEmpty else { return }
+                store.unreadBySession[targetSid] = 0
+                selectedSessionId = targetSid
+                store.pendingOpenSessionId = nil
+            }
         }
     }
 
@@ -136,6 +142,16 @@ struct MessagesTabView: View {
                     Label("新建工程安排干活会话", systemImage: "hammer")
                 }
 
+                if let topSess = store.enabledSessions.first {
+                    Button {
+                        Task {
+                            await store.forkSession(sessionId: topSess.id)
+                        }
+                    } label: {
+                        Label("从「\(topSess.shortName)」新开分支", systemImage: "arrow.triangle.branch")
+                    }
+                }
+
                 Divider()
 
                 Button {
@@ -242,6 +258,25 @@ struct MessagesTabView: View {
                                 sessionRow(sess)
                             }
                             .buttonStyle(.plain)
+                            .contextMenu {
+                                Button {
+                                    Task {
+                                        await store.forkSession(sessionId: sess.id)
+                                    }
+                                } label: {
+                                    Label("从该会话新开分支", systemImage: "arrow.triangle.branch")
+                                }
+
+                                if sess.id != "session-hajimi-ios-main" {
+                                    Button(role: .destructive) {
+                                        Task {
+                                            await store.toggleSessionEnabled(sessionId: sess.id, enabled: false)
+                                        }
+                                    } label: {
+                                        Label("在手机列表中隐藏此会话", systemImage: "eye.slash")
+                                    }
+                                }
+                            }
 
                             if sess.id != store.enabledSessions.last?.id {
                                 Divider().padding(.leading, 76)

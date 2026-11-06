@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct HajimiQQApp: App {
@@ -12,11 +13,21 @@ struct HajimiQQApp: App {
                 .task {
                     await store.bootstrap()
                 }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+                    Task {
+                        await store.handleAppWillEnterForeground()
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+                    store.handleAppDidEnterBackground()
+                }
                 .onChange(of: scenePhase) { _, newPhase in
                     if newPhase == .active {
                         Task {
-                            await store.handleAppDidBecomeActive()
+                            await store.handleAppWillEnterForeground()
                         }
+                    } else if newPhase == .background {
+                        store.handleAppDidEnterBackground()
                     }
                 }
         }

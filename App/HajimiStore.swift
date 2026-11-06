@@ -1,5 +1,7 @@
 import Foundation
 import SwiftUI
+import UIKit
+import Network
 import Darwin
 
 struct LiveStreamingStatus: Equatable {
@@ -26,17 +28,56 @@ final class HajimiStore: ObservableObject {
     @Published var diaryEntries: [CatgirlDiaryEntry] = []
     @Published var reactionsByMsgId: [String: [String]] = [:]
     @Published var toastMessage: String = ""
+    @Published var pendingOpenSessionId: String? = nil
+    @Published var isForkingSession: Bool = false
+    @Published var backgroundKeepAliveEnabled: Bool = true
+    @Published var backgroundNotifyEnabled: Bool = true
 
     var activeViewingSessionId: String? = nil
     var bootstrapFallbackUrls: [String] = []
     private var didFinishBootstrap: Bool = false
     private var sseTask: Task<Void, Never>? = nil
+    private var watchdogTask: Task<Void, Never>? = nil
     private var toastTask: Task<Void, Never>? = nil
     private var liveClearTasks: [String: Task<Void, Never>] = [:]
+    private var sseGeneration: UInt64 = 0
+    private var isSseStreamingActive: Bool = false
+    private var lastSseFrameAt: Date = .distantPast
+    private var isAppInForeground: Bool = true
+    private var isPausedForBackground: Bool = false
+    private var lastForegroundWakeAt: Date = .distantPast
+    private var pathMonitor: NWPathMonitor? = nil
+    private var lastPathSignature: String = ""
+
+    private lazy var sseUrlSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 38
+        cfg.timeoutIntervalForResource = 86400 * 30
+        cfg.waitsForConnectivity = false
+        cfg.allowsCellularAccess = true
+        cfg.allowsExpensiveNetworkAccess = true
+        cfg.allowsConstrainedNetworkAccess = true
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: cfg)
+    }()
+
+    private lazy var apiUrlSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 20
+        cfg.timeoutIntervalForResource = 120
+        cfg.waitsForConnectivity = false
+        cfg.allowsCellularAccess = true
+        cfg.allowsExpensiveNetworkAccess = true
+        cfg.allowsConstrainedNetworkAccess = true
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: cfg)
+    }()
 
     private let serverKey = "hjm_server_url_v2"
     private let authKey = "hjm_pair_key_v2"
     private let reactionsKey = "hjm_msg_reactions_v1"
+    private let bgKeepAliveKey = "hjm_bg_keepalive_v1"
+    private let bgNotifyKey = "hjm_bg_notify_v1"
 
     init() {
         var initialUrl = UserDefaults.standard.string(forKey: serverKey) ?? ""
@@ -66,6 +107,17 @@ final class HajimiStore: ObservableObject {
         if let rawReact = UserDefaults.standard.data(forKey: reactionsKey),
            let dec = try? JSONDecoder().decode([String: [String]].self, from: rawReact) {
             self.reactionsByMsgId = dec
+        }
+
+        if UserDefaults.standard.object(forKey: bgKeepAliveKey) != nil {
+            self.backgroundKeepAliveEnabled = UserDefaults.standard.bool(forKey: bgKeepAliveKey)
+        } else {
+            self.backgroundKeepAliveEnabled = true
+        }
+        if UserDefaults.standard.object(forKey: bgNotifyKey) != nil {
+            self.backgroundNotifyEnabled = UserDefaults.standard.bool(forKey: bgNotifyKey)
+        } else {
+            self.backgroundNotifyEnabled = true
         }
 
         self.bootstrapFallbackUrls = fallbacks
@@ -133,6 +185,11 @@ final class HajimiStore: ObservableObject {
 
     func bootstrap() async {
         defer { didFinishBootstrap = true }
+        startNetworkMonitorIfNeeded()
+        startConnectionWatchdogIfNeeded()
+        if backgroundNotifyEnabled {
+            BackgroundKeepAliveManager.shared.requestNotificationPermissionIfNeeded()
+        }
         if serverUrl.isEmpty {
             await autoScanLanServer(silent: true)
         }
@@ -141,15 +198,101 @@ final class HajimiStore: ObservableObject {
         if !isConnected {
             await autoScanLanServer(silent: true)
         }
-        startSseLoop()
+        startSseLoop(force: true)
+    }
+
+    func setBackgroundKeepAlive(_ enabled: Bool) {
+        backgroundKeepAliveEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: bgKeepAliveKey)
+        BackgroundKeepAliveManager.shared.updateKeepAlivePreference(enabled)
+        showToast(enabled ? "🌙 已开启后台静音保活（锁屏/切后台不断连）" : "已切换为仅前台连接（切后台约 30 秒休眠）")
+    }
+
+    func setBackgroundNotify(_ enabled: Bool) {
+        backgroundNotifyEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: bgNotifyKey)
+        if enabled {
+            BackgroundKeepAliveManager.shared.requestNotificationPermissionIfNeeded()
+        }
+        showToast(enabled ? "🔔 已开启后台回复横幅通知" : "已关闭后台回复通知")
+    }
+
+    func handleAppDidEnterBackground() {
+        isAppInForeground = false
+        guard !pairKey.isEmpty else { return }
+        BackgroundKeepAliveManager.shared.enterBackground(keepAlive: backgroundKeepAliveEnabled) { [weak self] in
+            guard let self = self else { return }
+            self.isPausedForBackground = true
+            self.sseGeneration &+= 1
+            self.isSseStreamingActive = false
+            self.sseTask?.cancel()
+            self.sseTask = nil
+        }
+    }
+
+    func handleAppWillEnterForeground() async {
+        isAppInForeground = true
+        let wasPaused = isPausedForBackground
+        isPausedForBackground = false
+        BackgroundKeepAliveManager.shared.enterForeground()
+        guard didFinishBootstrap, !serverUrl.isEmpty, !pairKey.isEmpty else { return }
+        let now = Date()
+        if !wasPaused && now.timeIntervalSince(lastForegroundWakeAt) < 1.2 {
+            return
+        }
+        lastForegroundWakeAt = now
+        startSseLoop(force: wasPaused)
+        await refreshAll()
+        if !isConnected {
+            await autoScanLanServer(silent: true)
+        }
+        if let activeSid = activeViewingSessionId {
+            await loadHistory(sessionId: activeSid)
+        }
     }
 
     func handleAppDidBecomeActive() async {
-        guard didFinishBootstrap, !serverUrl.isEmpty, !pairKey.isEmpty else { return }
-        startSseLoop()
-        await refreshAll()
-        if let activeSid = activeViewingSessionId {
-            await loadHistory(sessionId: activeSid)
+        await handleAppWillEnterForeground()
+    }
+
+    private func startNetworkMonitorIfNeeded() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        pathMonitor = monitor
+        monitor.pathUpdateHandler = { [weak self] path in
+            let sig = "\(path.status)-\(path.availableInterfaces.map(\.name).joined(separator: ","))"
+            let satisfied = (path.status == .satisfied)
+            Task { @MainActor [weak self] in
+                guard let self = self, self.didFinishBootstrap, !self.pairKey.isEmpty else { return }
+                let changed = (sig != self.lastPathSignature)
+                self.lastPathSignature = sig
+                if satisfied && changed && !self.isPausedForBackground {
+                    self.startSseLoop(force: true)
+                    await self.loadOverview()
+                    if !self.isConnected {
+                        await self.autoScanLanServer(silent: true)
+                    }
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "com.zizhe.hajimiqq.netmonitor"))
+    }
+
+    private func startConnectionWatchdogIfNeeded() {
+        guard watchdogTask == nil else { return }
+        watchdogTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 16_000_000_000)
+                guard let self = self else { return }
+                guard self.didFinishBootstrap, !self.pairKey.isEmpty, !self.serverUrl.isEmpty else { continue }
+                if self.isPausedForBackground { continue }
+                if !self.isAppInForeground && !self.backgroundKeepAliveEnabled { continue }
+                let stale = Date().timeIntervalSince(self.lastSseFrameAt) > 30
+                if !self.isConnected || !self.isSseStreamingActive || stale {
+                    self.startSseLoop(force: true)
+                    await self.loadOverview()
+                }
+            }
         }
     }
 
@@ -175,7 +318,7 @@ final class HajimiStore: ObservableObject {
                 }
                 showToast("已连接电脑端 DSH！")
                 await refreshAll()
-                startSseLoop()
+                startSseLoop(force: true)
                 return true
             } else {
                 showToast(decoded.error ?? "配对码错误")
@@ -194,6 +337,9 @@ final class HajimiStore: ObservableObject {
         defer { isScanningLan = false }
 
         var fastCandidates: [String] = []
+        if !serverUrl.isEmpty {
+            fastCandidates.append(serverUrl)
+        }
         for fb in bootstrapFallbackUrls where !fastCandidates.contains(fb) {
             fastCandidates.append(fb)
         }
@@ -231,7 +377,7 @@ final class HajimiStore: ObservableObject {
         }
         if !pairKey.isEmpty {
             await refreshAll()
-            startSseLoop()
+            startSseLoop(force: changed)
         }
     }
 
@@ -335,7 +481,7 @@ final class HajimiStore: ObservableObject {
 
     private func authedData(path: String, method: String = "GET", jsonBody: [String: Any]? = nil, timeout: TimeInterval = 20) async throws -> Data {
         let req = try authedRequest(path: path, method: method, jsonBody: jsonBody, timeout: timeout)
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await apiUrlSession.data(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
@@ -345,6 +491,9 @@ final class HajimiStore: ObservableObject {
         }
         guard (200...299).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
+        }
+        if !self.isConnected {
+            self.isConnected = true
         }
         return data
     }
@@ -361,8 +510,8 @@ final class HajimiStore: ObservableObject {
 
     func loadOverview() async {
         do {
-            let req = try authedRequest(path: "/api/ios/overview")
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let req = try authedRequest(path: "/api/ios/overview", timeout: 10)
+            let (data, resp) = try await apiUrlSession.data(for: req)
             if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
                 let decoded = try JSONDecoder().decode(OverviewResponse.self, from: data)
                 self.isConnected = true
@@ -374,7 +523,9 @@ final class HajimiStore: ObservableObject {
                 self.isConnected = false
             }
         } catch {
-            self.isConnected = false
+            if !self.isSseStreamingActive {
+                self.isConnected = false
+            }
         }
     }
 
@@ -528,7 +679,7 @@ final class HajimiStore: ObservableObject {
     func createNewSession(kind: String) async -> String? {
         do {
             let req = try authedRequest(path: "/api/ios/create-session", method: "POST", jsonBody: ["kind": kind])
-            let (data, _) = try await URLSession.shared.data(for: req)
+            let (data, _) = try await apiUrlSession.data(for: req)
             await loadOverview()
             if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let sid = obj["sessionId"] as? String {
@@ -538,6 +689,52 @@ final class HajimiStore: ObservableObject {
             showToast("新建会话失败")
         }
         return nil
+    }
+
+    static func extractEventSeq(from msgId: String) -> Int? {
+        guard msgId.hasPrefix("ev-") else { return nil }
+        return Int(msgId.dropFirst(3))
+    }
+
+    @discardableResult
+    func forkSession(sessionId: String, atSeq: Int? = nil, navigate: Bool = true) async -> String? {
+        guard !isForkingSession else { return nil }
+        isForkingSession = true
+        defer { isForkingSession = false }
+        HapticsHelper.lightTap()
+
+        var body: [String: Any] = ["sessionId": sessionId]
+        if let seq = atSeq, seq >= 0 {
+            body["atSeq"] = seq
+        }
+
+        do {
+            let data = try await authedData(path: "/api/ios/fork-session", method: "POST", jsonBody: body, timeout: 25)
+            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let newSid = obj["sessionId"] as? String, !newSid.isEmpty else {
+                showToast("新开分支失败")
+                return nil
+            }
+            let title = (obj["title"] as? String) ?? "新分支"
+            if let cardObj = obj["session"],
+               let cardData = try? JSONSerialization.data(withJSONObject: cardObj),
+               let card = try? JSONDecoder().decode(SessionCard.self, from: cardData) {
+                var list = self.enabledSessions.filter { $0.id != newSid }
+                list.insert(card, at: 0)
+                self.enabledSessions = list
+            } else {
+                await loadOverview()
+            }
+            await loadHistory(sessionId: newSid)
+            if navigate {
+                self.pendingOpenSessionId = newSid
+            }
+            showToast(atSeq != nil ? "🔀 已从该消息处新开分支：\(title)" : "🔀 已新开分支：\(title)")
+            return newSid
+        } catch {
+            showToast("新开分支失败，请确认电脑端 DSH 已连接")
+            return nil
+        }
     }
 
     func toggleSessionEnabled(sessionId: String, enabled: Bool) async {
@@ -764,51 +961,105 @@ final class HajimiStore: ObservableObject {
         }
     }
 
-    // MARK: - Real-Time SSE Loop
-    func startSseLoop() {
+    // MARK: - Real-Time SSE Loop (Generation-Guarded + Anti-Jitter + Background Keep-Alive)
+    func startSseLoop(force: Bool = false) {
+        guard !serverUrl.isEmpty, !pairKey.isEmpty, !isPausedForBackground else { return }
+        if !force,
+           isSseStreamingActive,
+           sseTask != nil,
+           Date().timeIntervalSince(lastSseFrameAt) < 26 {
+            return
+        }
+
+        sseGeneration &+= 1
+        let myGen = sseGeneration
+        isSseStreamingActive = false
         sseTask?.cancel()
-        guard !serverUrl.isEmpty, !pairKey.isEmpty else { return }
+
         let base = serverUrl
         let key = pairKey
+        let session = sseUrlSession
 
         sseTask = Task { [weak self] in
             var consecutiveFailures = 0
             while !Task.isCancelled {
                 guard let self = self else { return }
+                if self.sseGeneration != myGen || self.isPausedForBackground { break }
+
                 let encodedK = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
                 guard let url = URL(string: "\(base)/api/ios/stream?k=\(encodedK)") else { break }
                 var req = URLRequest(url: url)
-                req.timeoutInterval = 300
+                req.timeoutInterval = 38
+                req.cachePolicy = .reloadIgnoringLocalCacheData
                 req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+
                 do {
-                    let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+                    let (bytes, resp) = try await session.bytes(for: req)
+                    if Task.isCancelled || self.sseGeneration != myGen { break }
                     if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
+                        let recoveredFromFailure = (consecutiveFailures > 0 || !self.isConnected)
                         consecutiveFailures = 0
-                        await MainActor.run { self.isConnected = true }
+                        self.isSseStreamingActive = true
+                        self.lastSseFrameAt = Date()
+                        self.isConnected = true
+                        if recoveredFromFailure {
+                            Task { [weak self] in
+                                await self?.loadOverview()
+                                if let sid = self?.activeViewingSessionId {
+                                    await self?.loadHistory(sessionId: sid)
+                                }
+                            }
+                        }
                         var currentEvent = "message"
                         for try await line in bytes.lines {
-                            if Task.isCancelled { break }
+                            if Task.isCancelled || self.sseGeneration != myGen || self.isPausedForBackground { break }
+                            self.lastSseFrameAt = Date()
+                            if !self.isConnected { self.isConnected = true }
                             if line.hasPrefix("event:") {
                                 currentEvent = String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces)
                             } else if line.hasPrefix("data:") {
-                                let jsonStr = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-                                await self.handleSseFrame(event: currentEvent, jsonString: jsonStr)
+                                if currentEvent != "heartbeat" {
+                                    let jsonStr = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                                    await self.handleSseFrame(event: currentEvent, jsonString: jsonStr)
+                                }
                                 currentEvent = "message"
                             }
                         }
+                        self.isSseStreamingActive = false
+                    } else if let http = resp as? HTTPURLResponse, http.statusCode == 401 {
+                        self.isSseStreamingActive = false
+                        self.isConnected = false
+                        break
                     } else {
-                        await MainActor.run { self.isConnected = false }
+                        self.isSseStreamingActive = false
+                        consecutiveFailures += 1
                     }
                 } catch {
+                    if Task.isCancelled || self.sseGeneration != myGen || self.isPausedForBackground {
+                        break
+                    }
+                    self.isSseStreamingActive = false
                     consecutiveFailures += 1
-                    await MainActor.run { self.isConnected = false }
+                    // First transient reset: retry in 350ms WITHOUT flashing disconnected banner
+                    if consecutiveFailures == 1 {
+                        try? await Task.sleep(nanoseconds: 350_000_000)
+                        continue
+                    }
+                    // Confirm reachability before flipping disconnected & scanning LAN
+                    let stillAlive = await Self.probeCandidateList([base], timeout: 0.9) != nil
+                    if stillAlive {
+                        try? await Task.sleep(nanoseconds: 600_000_000)
+                        continue
+                    }
+                    self.isConnected = false
                     if consecutiveFailures >= 2 {
                         consecutiveFailures = 0
                         await self.autoScanLanServer(silent: true)
                         if self.serverUrl != base { break }
                     }
                 }
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                if Task.isCancelled || self.sseGeneration != myGen || self.isPausedForBackground { break }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
             }
         }
     }
@@ -869,8 +1120,18 @@ final class HajimiStore: ObservableObject {
                 liveClearTasks.removeValue(forKey: sid)
                 messagesBySession[sid] = decodedMsgs
                 liveBySession.removeValue(forKey: sid)
-                if activeViewingSessionId != sid, (obj["newAssistantReply"] as? Bool) == true {
+                let isNewReply = (obj["newAssistantReply"] as? Bool) == true
+                if activeViewingSessionId != sid, isNewReply {
                     unreadBySession[sid, default: 0] += 1
+                }
+                if !isAppInForeground, backgroundNotifyEnabled, isNewReply,
+                   let lastAssistant = decodedMsgs.last(where: { $0.kind == "assistant" && !$0.text.isEmpty }) {
+                    let cardTitle = enabledSessions.first(where: { $0.id == sid })?.chatTitle ?? profile.hajimiName
+                    BackgroundKeepAliveManager.shared.postBackgroundReplyNotification(
+                        title: cardTitle,
+                        body: lastAssistant.text,
+                        sessionId: sid
+                    )
                 }
             }
         } else if event == "soul" {
