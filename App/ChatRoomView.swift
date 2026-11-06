@@ -20,6 +20,9 @@ struct ChatRoomView: View {
     @State private var pokeAnimatingId: String? = nil
     @State private var quotingMessage: ChatMessageItem? = nil
     @State private var viewingImageItem: PreviewImageItem? = nil
+    @State private var didInitialScroll: Bool = false
+    @State private var historyLoadSeq: Int = 0
+    @FocusState private var isInputFocused: Bool
 
     private var session: SessionCard {
         store.enabledSessions.first(where: { $0.id == sessionId })
@@ -142,7 +145,10 @@ struct ChatRoomView: View {
         .onAppear {
             store.activeViewingSessionId = sessionId
             store.unreadBySession[sessionId] = 0
-            Task { await store.loadHistory(sessionId: sessionId) }
+            Task {
+                await store.loadHistory(sessionId: sessionId)
+                historyLoadSeq &+= 1
+            }
         }
         .onDisappear {
             if store.activeViewingSessionId == sessionId {
@@ -213,6 +219,20 @@ struct ChatRoomView: View {
         .overlay(Divider(), alignment: .bottom)
     }
 
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        if animated {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo("bottom-anchor", anchor: .bottom)
+            }
+        } else {
+            var tx = Transaction()
+            tx.disablesAnimations = true
+            withTransaction(tx) {
+                proxy.scrollTo("bottom-anchor", anchor: .bottom)
+            }
+        }
+    }
+
     private var messagesArea: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -244,14 +264,43 @@ struct ChatRoomView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 12)
             }
+            .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
-            .onChange(of: messages.count) { _, _ in
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo("bottom-anchor", anchor: .bottom)
+            .onAppear {
+                guard !didInitialScroll else { return }
+                didInitialScroll = true
+                scrollToBottom(proxy, animated: false)
+                DispatchQueue.main.async {
+                    scrollToBottom(proxy, animated: false)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    scrollToBottom(proxy, animated: false)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                    scrollToBottom(proxy, animated: false)
                 }
             }
+            .onChange(of: historyLoadSeq) { _, _ in
+                scrollToBottom(proxy, animated: false)
+                DispatchQueue.main.async {
+                    scrollToBottom(proxy, animated: false)
+                }
+            }
+            .onChange(of: messages.count) { _, _ in
+                scrollToBottom(proxy, animated: true)
+            }
+            .onChange(of: messages.last?.id) { _, _ in
+                scrollToBottom(proxy, animated: true)
+            }
             .onChange(of: liveStatus?.text) { _, _ in
-                proxy.scrollTo("bottom-anchor", anchor: .bottom)
+                scrollToBottom(proxy, animated: false)
+            }
+            .onChange(of: isInputFocused) { _, focused in
+                if focused {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                        scrollToBottom(proxy, animated: true)
+                    }
+                }
             }
         }
     }
@@ -602,6 +651,7 @@ struct ChatRoomView: View {
                 }
 
                 TextField("发消息或安排干活...", text: $draftText, axis: .vertical)
+                    .focused($isInputFocused)
                     .lineLimit(1...4)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)

@@ -21,6 +21,7 @@ struct MessagesTabView: View {
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationDestination(item: $selectedSessionId) { sid in
                 ChatRoomView(sessionId: sid)
+                    .id(sid)
             }
         }
     }
