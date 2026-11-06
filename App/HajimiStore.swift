@@ -550,7 +550,7 @@ final class HajimiStore: ObservableObject {
             if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
                 let decoded = try JSONDecoder().decode(HistoryResponse.self, from: data)
                 if let prof = decoded.profile { self.profile = prof }
-                if let msgs = decoded.messages { self.messagesBySession[sessionId] = msgs }
+                if let msgs = decoded.messages { self.messagesBySession[sessionId] = Self.sanitizeChatMessages(msgs) }
                 if let card = decoded.session,
                    let idx = self.enabledSessions.firstIndex(where: { $0.id == sessionId }) {
                     self.enabledSessions[idx] = card
@@ -1064,13 +1064,68 @@ final class HajimiStore: ObservableObject {
         }
     }
 
-    private static func sanitizeLiveStreamingText(_ raw: String) -> String {
+    private static func sanitizeAssistantText(_ raw: String, isStreaming: Bool) -> String {
         var s = raw
+        if s.isEmpty { return "" }
+
+        // 1. Strip raw Gemini 4 `<|thought|>...<|thought|>` or unflagged `thought\n...` leaked blocks
+        s = s.replacingOccurrences(of: #"<\|thought\|>[\s\S]*?<\|thought\|>"#, with: "", options: [.regularExpression])
+        if s.range(of: #"^\s*(?:<\|thought\|>\s*)?thought\r?\n"#, options: [.regularExpression]) != nil {
+            if let r = s.range(of: "<|thought|>") {
+                s = String(s[r.upperBound...])
+            } else {
+                return ""
+            }
+        }
+
+        // 2. Strip upstream redaction/empty markers & <think>/<thought> blocks
+        s = s.replacingOccurrences(of: #"^\s*\[-REDACTED-\]\s*"#, with: "", options: [.regularExpression])
+        s = s.replacingOccurrences(of: #"\[\[empty upstream[^\]]*\]\]"#, with: "", options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: #"<think\b[^>]*>[\s\S]*?<\/think>"#, with: "", options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: #"<thought\b[^>]*>[\s\S]*?<\/thought>"#, with: "", options: [.regularExpression, .caseInsensitive])
+        s = s.replacingOccurrences(of: #"<think\b[^>]*>[\s\S]*$"#, with: "", options: [.regularExpression, .caseInsensitive])
+
+        // 3. Strip closed & unclosed SoulOS tags
         s = s.replacingOccurrences(of: #"<hajimi_thought[^>]*>[\s\S]*?<\/hajimi_thought>"#, with: "", options: [.regularExpression, .caseInsensitive])
         s = s.replacingOccurrences(of: #"<hajimi_memory[^>]*>[\s\S]*?<\/hajimi_memory>"#, with: "", options: [.regularExpression, .caseInsensitive])
-        s = s.replacingOccurrences(of: #"<\/?hajimi_[a-zA-Z0-9_]*[\s\S]*$"#, with: "", options: [.regularExpression, .caseInsensitive])
-        s = s.replacingOccurrences(of: #"<\/?(?:h(?:a(?:j(?:i(?:m(?:i)?)?)?)?)?)?$"#, with: "", options: [.regularExpression, .caseInsensitive])
+        if isStreaming {
+            s = s.replacingOccurrences(of: #"<\/?(?:hajimi_[a-zA-Z0-9_]*|think\b|thought\b)[\s\S]*$"#, with: "", options: [.regularExpression, .caseInsensitive])
+            s = s.replacingOccurrences(of: #"<\|thought\|>[\s\S]*$"#, with: "", options: [.regularExpression])
+            s = s.replacingOccurrences(of: #"<\/?(?:h(?:a(?:j(?:i(?:m(?:i)?)?)?)?)?|t(?:h(?:i(?:n(?:k)?)?)?)?)?$"#, with: "", options: [.regularExpression, .caseInsensitive])
+        } else {
+            s = s.replacingOccurrences(of: #"<hajimi_(?:thought|memory)\b[\s\S]*$"#, with: "", options: [.regularExpression, .caseInsensitive])
+            s = s.replacingOccurrences(of: #"<\/?hajimi_(?:thought|memory)[^>]*>"#, with: "", options: [.regularExpression, .caseInsensitive])
+        }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func sanitizeLiveStreamingText(_ raw: String) -> String {
+        sanitizeAssistantText(raw, isStreaming: true)
+    }
+
+    private static func sanitizeChatMessages(_ items: [ChatMessageItem]) -> [ChatMessageItem] {
+        var out: [ChatMessageItem] = []
+        out.reserveCapacity(items.count)
+        for var item in items {
+            if item.kind == "user" {
+                let t = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if t.hasPrefix("Time sampled while preparing turn ") ||
+                   t.hasPrefix("Current runtime context. This snapshot supersedes") ||
+                   (t.hasPrefix("Background subagent ") && t.contains(" finished and will do no further work")) {
+                    continue
+                }
+                out.append(item)
+            } else if item.kind == "assistant" {
+                let cleaned = sanitizeAssistantText(item.text, isStreaming: false)
+                if !cleaned.isEmpty || !item.images.isEmpty {
+                    item.text = cleaned
+                    out.append(item)
+                }
+            } else {
+                out.append(item)
+            }
+        }
+        return out
     }
 
     private func handleSseFrame(event: String, jsonString: String) async {
@@ -1116,16 +1171,17 @@ final class HajimiStore: ObservableObject {
                let msgsArr = obj["messages"],
                let msgsData = try? JSONSerialization.data(withJSONObject: msgsArr),
                let decodedMsgs = try? JSONDecoder().decode([ChatMessageItem].self, from: msgsData) {
+                let cleanedMsgs = Self.sanitizeChatMessages(decodedMsgs)
                 liveClearTasks[sid]?.cancel()
                 liveClearTasks.removeValue(forKey: sid)
-                messagesBySession[sid] = decodedMsgs
+                messagesBySession[sid] = cleanedMsgs
                 liveBySession.removeValue(forKey: sid)
                 let isNewReply = (obj["newAssistantReply"] as? Bool) == true
                 if activeViewingSessionId != sid, isNewReply {
                     unreadBySession[sid, default: 0] += 1
                 }
                 if !isAppInForeground, backgroundNotifyEnabled, isNewReply,
-                   let lastAssistant = decodedMsgs.last(where: { $0.kind == "assistant" && !$0.text.isEmpty }) {
+                   let lastAssistant = cleanedMsgs.last(where: { $0.kind == "assistant" && !$0.text.isEmpty }) {
                     let cardTitle = enabledSessions.first(where: { $0.id == sid })?.chatTitle ?? profile.hajimiName
                     BackgroundKeepAliveManager.shared.postBackgroundReplyNotification(
                         title: cardTitle,
