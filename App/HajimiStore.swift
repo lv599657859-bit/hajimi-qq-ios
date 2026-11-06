@@ -22,30 +22,49 @@ final class HajimiStore: ObservableObject {
     @Published var providers: [ProviderCatalogEntry] = []
     @Published var memories: [SharedMemoryEntry] = []
     @Published var evolution: PersonaEvolutionState = PersonaEvolutionState()
+    @Published var reactionsByMsgId: [String: [String]] = [:]
     @Published var toastMessage: String = ""
 
     var activeViewingSessionId: String? = nil
+    var bootstrapFallbackUrls: [String] = []
     private var sseTask: Task<Void, Never>? = nil
     private var toastTask: Task<Void, Never>? = nil
 
     private let serverKey = "hjm_server_url_v2"
     private let authKey = "hjm_pair_key_v2"
+    private let reactionsKey = "hjm_msg_reactions_v1"
 
     init() {
         var initialUrl = UserDefaults.standard.string(forKey: serverKey) ?? ""
         var initialKey = UserDefaults.standard.string(forKey: authKey) ?? ""
+        var fallbacks: [String] = []
 
         if let bootUrl = Bundle.main.url(forResource: "LocalBootstrap", withExtension: "json"),
            let data = try? Data(contentsOf: bootUrl),
            let boot = try? JSONDecoder().decode(LocalBootstrapConfig.self, from: data) {
-            if initialUrl.isEmpty, let s = boot.serverUrl, !s.isEmpty {
-                initialUrl = s
+            if let s = boot.serverUrl, !s.isEmpty {
+                if initialUrl.isEmpty { initialUrl = s }
+                fallbacks.append(Self.normalizeBaseUrl(s))
+            }
+            if let list = boot.fallbackUrls {
+                for item in list {
+                    let norm = Self.normalizeBaseUrl(item)
+                    if !norm.isEmpty && !fallbacks.contains(norm) {
+                        fallbacks.append(norm)
+                    }
+                }
             }
             if initialKey.isEmpty, let k = boot.pairKey, !k.isEmpty {
                 initialKey = k
             }
         }
 
+        if let rawReact = UserDefaults.standard.data(forKey: reactionsKey),
+           let dec = try? JSONDecoder().decode([String: [String]].self, from: rawReact) {
+            self.reactionsByMsgId = dec
+        }
+
+        self.bootstrapFallbackUrls = fallbacks
         self.serverUrl = Self.normalizeBaseUrl(initialUrl)
         self.pairKey = initialKey
     }
@@ -109,8 +128,14 @@ final class HajimiStore: ObservableObject {
     }
 
     func bootstrap() async {
+        if serverUrl.isEmpty {
+            await autoScanLanServer(silent: true)
+        }
         guard !serverUrl.isEmpty, !pairKey.isEmpty else { return }
         await refreshAll()
+        if !isConnected {
+            await autoScanLanServer(silent: true)
+        }
         startSseLoop()
     }
 
@@ -148,49 +173,78 @@ final class HajimiStore: ObservableObject {
         }
     }
 
-    /// Scan current /24 subnet on port 19390 to auto-locate DSH PC if router IP changed.
-    func autoScanLanServer() async {
+    /// Hotspot-First + Wi-Fi Subnet Auto-Discovery (0.2s fast probe for iPhone Personal Hotspot 172.20.10.2..14 & PC Hotspot 192.168.137.1)
+    func autoScanLanServer(silent: Bool = false) async {
         guard !isScanningLan else { return }
         isScanningLan = true
         defer { isScanningLan = false }
 
+        var fastCandidates: [String] = []
+        for fb in bootstrapFallbackUrls where !fastCandidates.contains(fb) {
+            fastCandidates.append(fb)
+        }
+        for host in 2...14 {
+            let hp = "http://172.20.10.\(host):19390"
+            if !fastCandidates.contains(hp) { fastCandidates.append(hp) }
+        }
+        if !fastCandidates.contains("http://192.168.137.1:19390") {
+            fastCandidates.append("http://192.168.137.1:19390")
+        }
+
+        if let fastHit = await Self.probeCandidateList(fastCandidates, timeout: 0.75) {
+            await applyDiscoveredServer(fastHit, silent: silent)
+            return
+        }
+
         let prefixes = Self.localIPv4Prefixes()
         for prefix in prefixes {
-            let found = await withTaskGroup(of: String?.self) { group -> String? in
-                for host in 1...254 {
-                    let candidate = "http://\(prefix).\(host):19390"
-                    group.addTask {
-                        guard let u = URL(string: "\(candidate)/api/ios/ping") else { return nil }
-                        var req = URLRequest(url: u)
-                        req.timeoutInterval = 0.75
-                        if let (data, resp) = try? await URLSession.shared.data(for: req),
-                           let http = resp as? HTTPURLResponse, http.statusCode == 200,
-                           let str = String(data: data, encoding: .utf8),
-                           str.contains("hajimi-ios-link") {
-                            return candidate
-                        }
-                        return nil
-                    }
-                }
-                for await res in group {
-                    if let hit = res {
-                        group.cancelAll()
-                        return hit
-                    }
-                }
-                return nil
-            }
-            if let hit = found {
-                saveConnection(url: hit)
-                showToast("已自动找到电脑：\(hit)")
-                if !pairKey.isEmpty {
-                    await refreshAll()
-                    startSseLoop()
-                }
+            let urls = (1...254).map { "http://\(prefix).\($0):19390" }
+            if let hit = await Self.probeCandidateList(urls, timeout: 0.85) {
+                await applyDiscoveredServer(hit, silent: silent)
                 return
             }
         }
-        showToast("未扫描到 19390 端口，请检查电脑 DSH 是否已开启")
+        if !silent {
+            showToast("未扫到电脑 19390 端口，请确认电脑已连同一热点/Wi-Fi")
+        }
+    }
+
+    private func applyDiscoveredServer(_ hit: String, silent: Bool) async {
+        let changed = (hit != serverUrl)
+        saveConnection(url: hit)
+        if !silent || changed {
+            showToast("📡 已自动连上电脑：\(hit)")
+        }
+        if !pairKey.isEmpty {
+            await refreshAll()
+            startSseLoop()
+        }
+    }
+
+    private static func probeCandidateList(_ urls: [String], timeout: TimeInterval) async -> String? {
+        await withTaskGroup(of: String?.self) { group -> String? in
+            for candidate in urls {
+                group.addTask {
+                    guard let u = URL(string: "\(candidate)/api/ios/ping") else { return nil }
+                    var req = URLRequest(url: u)
+                    req.timeoutInterval = timeout
+                    if let (data, resp) = try? await URLSession.shared.data(for: req),
+                       let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                       let str = String(data: data, encoding: .utf8),
+                       str.contains("hajimi-ios-link") {
+                        return candidate
+                    }
+                    return nil
+                }
+            }
+            for await res in group {
+                if let hit = res {
+                    group.cancelAll()
+                    return hit
+                }
+            }
+            return nil
+        }
     }
 
     private static func localIPv4Prefixes() -> [String] {
@@ -200,17 +254,24 @@ final class HajimiStore: ObservableObject {
             defer { freeifaddrs(ifaddr) }
             var ptr: UnsafeMutablePointer<ifaddrs>? = first
             while let cur = ptr {
-                let addr = cur.pointee.ifa_addr.pointee
-                if addr.sa_family == UInt8(AF_INET) {
-                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    if getnameinfo(cur.pointee.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
-                        let ip = String(cString: hostname)
-                        if !ip.hasPrefix("127.") && !ip.hasPrefix("169.254.") {
-                            let parts = ip.split(separator: ".")
-                            if parts.count == 4 {
-                                let p = "\(parts[0]).\(parts[1]).\(parts[2])"
-                                if !result.contains(p) {
-                                    result.append(p)
+                let name = String(cString: cur.pointee.ifa_name)
+                if !name.hasPrefix("pdp_ip") && !name.hasPrefix("utun") && !name.hasPrefix("ipsec") {
+                    let addr = cur.pointee.ifa_addr.pointee
+                    if addr.sa_family == UInt8(AF_INET) {
+                        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                        if getnameinfo(cur.pointee.ifa_addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                            let ip = String(cString: hostname)
+                            if !ip.hasPrefix("127.") && !ip.hasPrefix("169.254.") {
+                                let parts = ip.split(separator: ".")
+                                if parts.count == 4 {
+                                    let p = "\(parts[0]).\(parts[1]).\(parts[2])"
+                                    if !result.contains(p) {
+                                        if name.hasPrefix("bridge") || name.hasPrefix("ap") || name == "en0" {
+                                            result.insert(p, at: 0)
+                                        } else {
+                                            result.append(p)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -219,8 +280,8 @@ final class HajimiStore: ObservableObject {
                 ptr = cur.pointee.ifa_next
             }
         }
-        if result.isEmpty {
-            result.append("172.16.0")
+        if !result.contains("172.20.10") {
+            result.insert("172.20.10", at: 0)
         }
         return result
     }
@@ -526,6 +587,31 @@ final class HajimiStore: ObservableObject {
         }
     }
 
+    func toggleReaction(msgId: String, emoji: String) {
+        HapticsHelper.lightTap()
+        var arr = reactionsByMsgId[msgId] ?? []
+        if let idx = arr.firstIndex(of: emoji) {
+            arr.remove(at: idx)
+        } else {
+            arr.append(emoji)
+        }
+        reactionsByMsgId[msgId] = arr
+        if let encoded = try? JSONEncoder().encode(reactionsByMsgId) {
+            UserDefaults.standard.set(encoded, forKey: reactionsKey)
+        }
+    }
+
+    func fetchContextPreview(sessionId: String? = nil) async -> ContextPreviewResponse? {
+        let q = sessionId != nil ? "?sessionId=\(sessionId!.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" : ""
+        do {
+            let req = try authedRequest(path: "/api/ios/context-preview\(q)")
+            let (data, _) = try await URLSession.shared.data(for: req)
+            return try JSONDecoder().decode(ContextPreviewResponse.self, from: data)
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: - Real-Time SSE Loop
     func startSseLoop() {
         sseTask?.cancel()
@@ -534,6 +620,7 @@ final class HajimiStore: ObservableObject {
         let key = pairKey
 
         sseTask = Task { [weak self] in
+            var consecutiveFailures = 0
             while !Task.isCancelled {
                 guard let self = self else { return }
                 let encodedK = key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? key
@@ -544,6 +631,7 @@ final class HajimiStore: ObservableObject {
                 do {
                     let (bytes, resp) = try await URLSession.shared.bytes(for: req)
                     if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
+                        consecutiveFailures = 0
                         await MainActor.run { self.isConnected = true }
                         var currentEvent = "message"
                         for try await line in bytes.lines {
@@ -557,7 +645,13 @@ final class HajimiStore: ObservableObject {
                         }
                     }
                 } catch {
+                    consecutiveFailures += 1
                     await MainActor.run { self.isConnected = false }
+                    if consecutiveFailures >= 2 {
+                        consecutiveFailures = 0
+                        await self.autoScanLanServer(silent: true)
+                        if self.serverUrl != base { break }
+                    }
                 }
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
             }

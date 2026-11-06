@@ -30,15 +30,16 @@ targets:
       path: App/Resources/Info.plist
       properties:
         CFBundleDisplayName: 哈基米QQ
-        CFBundleShortVersionString: "2.0.0"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "2.2.0"
+        CFBundleVersion: "3"
         UILaunchScreen: {}
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-        NSLocalNetworkUsageDescription: 用于在同一 Wi-Fi 下直连电脑端 DSH 会话实时聊天、同步记忆与安排干活。
-        NSPhotoLibraryUsageDescription: 用于自定义你的头像、哈基米头像与立绘，以及在聊天中发送照片。
+        NSLocalNetworkUsageDescription: 用于在同一 Wi-Fi 或手机个人热点下自动发现并直连电脑端 DSH 会话。
+        NSPhotoLibraryUsageDescription: 用于自定义缩放裁切你的头像、哈基米头像与立绘，以及在聊天中发送照片。
+        NSPhotoLibraryAddUsageDescription: 用于将聊天中的图片或立绘保存到系统相册。
         NSCameraUsageDescription: 用于拍摄照片发送给哈基米或更换自定义头像。
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true

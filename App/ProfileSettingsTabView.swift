@@ -2,6 +2,15 @@ import SwiftUI
 import UIKit
 import PhotosUI
 
+private struct CropJobItem: Identifiable {
+    let id = UUID()
+    let image: UIImage
+    let field: String
+    let maskShape: CropMaskShape
+    let title: String
+    let maxDim: CGFloat
+}
+
 struct ProfileSettingsTabView: View {
     @EnvironmentObject var store: HajimiStore
     @State private var hajimiNameDraft: String = ""
@@ -12,30 +21,56 @@ struct ProfileSettingsTabView: View {
     @State private var hajimiAvatarItem: PhotosPickerItem?
     @State private var ownerAvatarItem: PhotosPickerItem?
     @State private var portraitPhotoItem: PhotosPickerItem?
+    @State private var activeCropJob: CropJobItem?
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("💕 对方形象与名字定制（TA 的头像与昵称）") {
+                Section("💕 对方形象与名字定制（自由缩放移动裁切）") {
                     HStack(spacing: 14) {
                         CachedAvatarImage(
                             urlString: store.hajimiAvatarFullUrl,
                             pairKey: store.pairKey,
-                            size: 62
+                            size: 64
                         ) {
                             Circle().fill(Color.purple.opacity(0.2)).overlay(Text("💕"))
+                        }
+                        .onTapGesture {
+                            openRecropExisting(
+                                urlString: store.hajimiAvatarFullUrl,
+                                field: "hajimiAvatarBase64",
+                                maskShape: .circle,
+                                title: "缩放裁切 TA 的头像",
+                                maxDim: 640
+                            )
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
                             PhotosPicker(selection: $hajimiAvatarItem, matching: .images) {
-                                Text("从手机相册更换 TA 的头像")
+                                Label("相册选图并自由缩放裁切", systemImage: "crop")
                                     .font(.system(size: 14, weight: .semibold))
                             }
+                            Button {
+                                openRecropExisting(
+                                    urlString: store.hajimiAvatarFullUrl,
+                                    field: "hajimiAvatarBase64",
+                                    maskShape: .circle,
+                                    title: "缩放移动当前头像",
+                                    maxDim: 640
+                                )
+                            } label: {
+                                Text("✂️ 重新缩放移动当前头像")
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundColor(.blue)
+                            }
+                            .buttonStyle(.plain)
+
                             if store.profile.hasCustomHajimiAvatar {
                                 Button("恢复默认原画头像", role: .destructive) {
                                     Task { await store.updateProfile(["resetHajimiAvatar": true]) }
                                 }
                                 .font(.system(size: 12.5))
+                                .buttonStyle(.plain)
                             }
                         }
                     }
@@ -49,9 +84,23 @@ struct ProfileSettingsTabView: View {
                     }
 
                     PhotosPicker(selection: $portraitPhotoItem, matching: .images) {
-                        Label("更换聊天窗全身立绘卡图片", systemImage: "person.crop.rectangle")
+                        Label("更换全身立绘卡（支持 3:4 缩放移动裁切）", systemImage: "person.crop.rectangle")
                             .font(.system(size: 14))
                     }
+
+                    Button {
+                        openRecropExisting(
+                            urlString: store.portraitFullUrl,
+                            field: "portraitBase64",
+                            maskShape: .portrait3x4,
+                            title: "缩放移动全身立绘 (3:4)",
+                            maxDim: 1440
+                        )
+                    } label: {
+                        Text("✂️ 重新缩放移动当前全身立绘")
+                            .font(.system(size: 13))
+                    }
+
                     if store.profile.hasCustomPortrait {
                         Button("恢复默认全身立绘", role: .destructive) {
                             Task { await store.updateProfile(["resetPortrait": true]) }
@@ -60,20 +109,29 @@ struct ProfileSettingsTabView: View {
                     }
                 }
 
-                Section("🧑 我的形象与名字定制（我的头像与昵称）") {
+                Section("🧑 我的形象与名字定制（自由缩放移动裁切）") {
                     HStack(spacing: 14) {
                         if store.profile.hasCustomOwnerAvatar {
                             CachedAvatarImage(
                                 urlString: store.ownerAvatarFullUrl,
                                 pairKey: store.pairKey,
-                                size: 62
+                                size: 64
                             ) {
                                 Circle().fill(Color.blue.opacity(0.2)).overlay(Text("我"))
+                            }
+                            .onTapGesture {
+                                openRecropExisting(
+                                    urlString: store.ownerAvatarFullUrl,
+                                    field: "ownerAvatarBase64",
+                                    maskShape: .circle,
+                                    title: "缩放裁切我的头像",
+                                    maxDim: 640
+                                )
                             }
                         } else {
                             Circle()
                                 .fill(LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                .frame(width: 62, height: 62)
+                                .frame(width: 64, height: 64)
                                 .overlay(
                                     Text(String((ownerNameDraft.isEmpty ? "我" : ownerNameDraft).prefix(1)))
                                         .font(.title2.bold())
@@ -83,14 +141,30 @@ struct ProfileSettingsTabView: View {
 
                         VStack(alignment: .leading, spacing: 8) {
                             PhotosPicker(selection: $ownerAvatarItem, matching: .images) {
-                                Text("从手机相册更换我的头像")
+                                Label("相册选图并自由缩放裁切", systemImage: "crop")
                                     .font(.system(size: 14, weight: .semibold))
                             }
                             if store.profile.hasCustomOwnerAvatar {
+                                Button {
+                                    openRecropExisting(
+                                        urlString: store.ownerAvatarFullUrl,
+                                        field: "ownerAvatarBase64",
+                                        maskShape: .circle,
+                                        title: "缩放移动我的头像",
+                                        maxDim: 640
+                                    )
+                                } label: {
+                                    Text("✂️ 重新缩放移动我的头像")
+                                        .font(.system(size: 12.5, weight: .medium))
+                                        .foregroundColor(.blue)
+                                }
+                                .buttonStyle(.plain)
+
                                 Button("恢复默认文字头像", role: .destructive) {
                                     Task { await store.updateProfile(["resetOwnerAvatar": true]) }
                                 }
                                 .font(.system(size: 12.5))
+                                .buttonStyle(.plain)
                             }
                         }
                     }
@@ -117,16 +191,16 @@ struct ProfileSettingsTabView: View {
                     }
                 }
 
-                Section("📡 电脑端 DSH 局域网连接") {
+                Section("📡 电脑端 DSH 热点 / Wi-Fi 连接") {
                     HStack {
                         Text("当前状态")
                         Spacer()
-                        Text(store.isConnected ? "🟢 已连接同步" : "🟠 未连接")
+                        Text(store.isConnected ? "🟢 已连接同步" : "🟠 未连接（可点下方秒扫热点）")
                             .foregroundColor(store.isConnected ? .green : .orange)
                             .font(.system(size: 13.5, weight: .semibold))
                     }
 
-                    TextField("http://192.168.x.x:19390", text: $serverUrlDraft)
+                    TextField("http://172.20.10.x:19390 或 Wi-Fi 地址", text: $serverUrlDraft)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .font(.system(size: 14, design: .monospaced))
@@ -137,7 +211,10 @@ struct ProfileSettingsTabView: View {
                             serverUrlDraft = store.serverUrl
                         }
                     } label: {
-                        Label(store.isScanningLan ? "正在扫描当前 Wi-Fi 网段..." : "自动扫描局域网内的电脑 DSH", systemImage: "dot.radiowaves.left.and.right")
+                        Label(
+                            store.isScanningLan ? "正在秒扫手机热点与 Wi-Fi 网段..." : "自动寻址手机个人热点 / Wi-Fi 电脑",
+                            systemImage: "personalhotspot"
+                        )
                     }
                     .disabled(store.isScanningLan)
 
@@ -162,33 +239,125 @@ struct ProfileSettingsTabView: View {
                 }
             }
             .navigationTitle("🎨 装扮与连接")
+            .fullScreenCover(item: $activeCropJob) { job in
+                ImageCropperSheet(
+                    rawImage: job.image,
+                    maskShape: job.maskShape,
+                    title: job.title,
+                    outputMaxDimension: job.maxDim,
+                    onConfirm: { croppedJpeg in
+                        let b64 = croppedJpeg.base64EncodedString()
+                        let field = job.field
+                        activeCropJob = nil
+                        Task {
+                            await store.updateProfile([field: b64])
+                        }
+                    },
+                    onCancel: {
+                        activeCropJob = nil
+                    }
+                )
+            }
             .onAppear {
                 hajimiNameDraft = store.profile.hajimiName
                 ownerNameDraft = store.profile.ownerName
                 serverUrlDraft = store.serverUrl
+            }
+            .onChange(of: store.serverUrl) { _, newUrl in
+                serverUrlDraft = newUrl
             }
             .onChange(of: store.profile) { _, newProf in
                 hajimiNameDraft = newProf.hajimiName
                 ownerNameDraft = newProf.ownerName
             }
             .onChange(of: hajimiAvatarItem) { _, item in
-                uploadPhotoItem(item, field: "hajimiAvatarBase64", maxDim: 512)
+                prepareCropFromPicker(
+                    item,
+                    resetPicker: { hajimiAvatarItem = nil },
+                    field: "hajimiAvatarBase64",
+                    maskShape: .circle,
+                    title: "缩放移动 TA 的头像",
+                    maxDim: 640
+                )
             }
             .onChange(of: ownerAvatarItem) { _, item in
-                uploadPhotoItem(item, field: "ownerAvatarBase64", maxDim: 512)
+                prepareCropFromPicker(
+                    item,
+                    resetPicker: { ownerAvatarItem = nil },
+                    field: "ownerAvatarBase64",
+                    maskShape: .circle,
+                    title: "缩放移动我的头像",
+                    maxDim: 640
+                )
             }
             .onChange(of: portraitPhotoItem) { _, item in
-                uploadPhotoItem(item, field: "portraitBase64", maxDim: 1440)
+                prepareCropFromPicker(
+                    item,
+                    resetPicker: { portraitPhotoItem = nil },
+                    field: "portraitBase64",
+                    maskShape: .portrait3x4,
+                    title: "缩放裁切全身立绘 (3:4)",
+                    maxDim: 1440
+                )
             }
         }
     }
 
-    private func uploadPhotoItem(_ item: PhotosPickerItem?, field: String, maxDim: CGFloat) {
+    private func prepareCropFromPicker(
+        _ item: PhotosPickerItem?,
+        resetPicker: @escaping () -> Void,
+        field: String,
+        maskShape: CropMaskShape,
+        title: String,
+        maxDim: CGFloat
+    ) {
         guard let item = item else { return }
         Task {
             if let data = try? await item.loadTransferable(type: Data.self),
-               let b64 = ImageCompressionHelper.compressToJpegBase64(data, maxDimension: maxDim, quality: 0.88) {
-                await store.updateProfile([field: b64])
+               let uiImg = UIImage(data: data) {
+                await MainActor.run {
+                    resetPicker()
+                    activeCropJob = CropJobItem(
+                        image: uiImg,
+                        field: field,
+                        maskShape: maskShape,
+                        title: title,
+                        maxDim: maxDim
+                    )
+                }
+            } else {
+                await MainActor.run { resetPicker() }
+            }
+        }
+    }
+
+    private func openRecropExisting(
+        urlString: String,
+        field: String,
+        maskShape: CropMaskShape,
+        title: String,
+        maxDim: CGFloat
+    ) {
+        if let cached = RemoteImageMemoryCache.shared.get(urlString) {
+            activeCropJob = CropJobItem(image: cached, field: field, maskShape: maskShape, title: title, maxDim: maxDim)
+            return
+        }
+        guard let url = URL(string: urlString) else {
+            store.showToast("请先连接电脑端 DSH 或从相册选图")
+            return
+        }
+        Task {
+            var req = URLRequest(url: url)
+            if !store.pairKey.isEmpty {
+                req.setValue(store.pairKey, forHTTPHeaderField: "x-hajimi-key")
+            }
+            if let (data, resp) = try? await URLSession.shared.data(for: req),
+               let http = resp as? HTTPURLResponse, http.statusCode == 200,
+               let uiImg = UIImage(data: data) {
+                RemoteImageMemoryCache.shared.set(urlString, image: uiImg)
+                activeCropJob = CropJobItem(image: uiImg, field: field, maskShape: maskShape, title: title, maxDim: maxDim)
+            } else {
+                store.showToast("尚未加载到原图，请直接从相册选图")
             }
         }
     }

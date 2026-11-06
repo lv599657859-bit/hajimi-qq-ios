@@ -9,6 +9,9 @@ struct MessagesTabView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 qqHeader
+                if !store.isConnected && !store.pairKey.isEmpty {
+                    hotspotReconnectBanner
+                }
                 if store.pairKey.isEmpty {
                     QuickPairCardView()
                 } else {
@@ -20,6 +23,50 @@ struct MessagesTabView: View {
                 ChatRoomView(sessionId: sid)
             }
         }
+    }
+
+    private var hotspotReconnectBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "personalhotspot")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.orange)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("网络切换或开启手机热点未连上？")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text("当前目标：\(store.serverUrl.isEmpty ? "未设置" : store.serverUrl)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Button {
+                Task { await store.autoScanLanServer() }
+            } label: {
+                HStack(spacing: 5) {
+                    if store.isScanningLan {
+                        ProgressView()
+                            .scaleEffect(0.75)
+                            .tint(.white)
+                    }
+                    Text(store.isScanningLan ? "寻址中" : "秒连热点/Wi-Fi")
+                        .font(.system(size: 12, weight: .bold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color.orange)
+                .clipShape(Capsule())
+            }
+            .disabled(store.isScanningLan)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(Color.orange.opacity(0.12))
+        .overlay(Divider(), alignment: .bottom)
     }
 
     private var qqHeader: some View {
@@ -43,7 +90,7 @@ struct MessagesTabView: View {
                     Circle()
                         .fill(store.isConnected ? Color.green : Color.orange)
                         .frame(width: 7, height: 7)
-                    Text(store.isConnected ? "同一 Wi-Fi 在线直连" : "等待连接电脑 DSH")
+                    Text(store.isConnected ? "热点 / Wi-Fi 在线直连" : "等待连接电脑 DSH")
                         .font(.system(size: 11.5))
                         .foregroundColor(.white.opacity(0.92))
                 }
@@ -73,6 +120,12 @@ struct MessagesTabView: View {
                 }
 
                 Divider()
+
+                Button {
+                    Task { await store.autoScanLanServer() }
+                } label: {
+                    Label("自动寻址热点 / Wi-Fi 电脑", systemImage: "personalhotspot")
+                }
 
                 Button {
                     Task { await store.refreshAll() }
@@ -107,11 +160,34 @@ struct MessagesTabView: View {
     private var sessionListContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                if !store.evolution.mindFlowActivity.isEmpty {
+                    HStack(alignment: .top, spacing: 8) {
+                        Text("🌊")
+                            .font(.system(size: 14))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(store.profile.hajimiName)的此刻心流")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(.purple)
+                            Text(store.evolution.mindFlowActivity)
+                                .font(.system(size: 12.5))
+                                .foregroundColor(.primary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.purple.opacity(0.08))
+                    .cornerRadius(12)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 10)
+                }
+
                 Text("📱 已开启直连的会话 (\(store.enabledSessions.count))")
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 16)
-                    .padding(.top, 12)
+                    .padding(.top, store.evolution.mindFlowActivity.isEmpty ? 12 : 2)
 
                 if store.enabledSessions.isEmpty {
                     VStack(spacing: 10) {
@@ -207,6 +283,9 @@ struct MessagesTabView: View {
             .padding(.bottom, 24)
         }
         .refreshable {
+            if !store.isConnected {
+                await store.autoScanLanServer(silent: true)
+            }
             await store.refreshAll()
         }
     }
@@ -303,12 +382,12 @@ struct QuickPairCardView: View {
     var body: some View {
         VStack(spacing: 16) {
             Spacer()
-            Image(systemName: "iphone.radiowaves.left.and.right")
+            Image(systemName: "personalhotspot")
                 .font(.system(size: 46))
                 .foregroundStyle(.blue)
             Text("连接电脑端 DSH")
                 .font(.title3.bold())
-            Text("确保 iPhone 与电脑连在同一 Wi-Fi，输入电脑 DSH 右上角「扫码」窗口显示的 6 位配对码即可永久绑定。")
+            Text("支持同一 Wi-Fi 或直接开启 iPhone 个人热点给电脑连接，点「自动扫描」即可 0.2 秒寻址绑定。")
                 .font(.footnote)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -316,7 +395,7 @@ struct QuickPairCardView: View {
 
             VStack(spacing: 10) {
                 HStack {
-                    TextField("http://192.168.x.x:19390", text: $urlInput)
+                    TextField("http://172.20.10.x:19390", text: $urlInput)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .font(.system(size: 14, design: .monospaced))

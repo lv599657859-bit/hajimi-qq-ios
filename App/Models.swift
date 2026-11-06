@@ -2,6 +2,7 @@ import Foundation
 
 struct LocalBootstrapConfig: Codable {
     var serverUrl: String?
+    var fallbackUrls: [String]?
     var pairKey: String?
 }
 
@@ -275,6 +276,8 @@ struct PersonaEvolutionState: Codable, Equatable {
     var turnsSinceLast: Int = 0
     var lastEvolvedAt: String = ""
     var currentVibe: String = ""
+    var mindFlowActivity: String = ""
+    var learnedExpressions: [String] = []
     var livingTraits: [String] = []
     var lastDiary: String = ""
     var history: [EvolutionHistoryItem] = []
@@ -283,7 +286,7 @@ struct PersonaEvolutionState: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case version, enabled, cycleEveryTurns, cycleEveryHours, turnsSinceLast
-        case lastEvolvedAt, currentVibe, livingTraits, lastDiary, history
+        case lastEvolvedAt, currentVibe, mindFlowActivity, learnedExpressions, livingTraits, lastDiary, history
     }
 
     init(from decoder: Decoder) throws {
@@ -295,10 +298,20 @@ struct PersonaEvolutionState: Codable, Equatable {
         turnsSinceLast = (try? c.decode(Int.self, forKey: .turnsSinceLast)) ?? 0
         lastEvolvedAt = (try? c.decode(String.self, forKey: .lastEvolvedAt)) ?? ""
         currentVibe = (try? c.decode(String.self, forKey: .currentVibe)) ?? ""
+        mindFlowActivity = (try? c.decode(String.self, forKey: .mindFlowActivity)) ?? ""
+        learnedExpressions = (try? c.decode([String].self, forKey: .learnedExpressions)) ?? []
         livingTraits = (try? c.decode([String].self, forKey: .livingTraits)) ?? []
         lastDiary = (try? c.decode(String.self, forKey: .lastDiary)) ?? ""
         history = (try? c.decode([EvolutionHistoryItem].self, forKey: .history)) ?? []
     }
+}
+
+struct ContextPreviewResponse: Codable {
+    var ok: Bool?
+    var mindFlow: String?
+    var livingPersonaBlock: String?
+    var sharedMemoryBlock: String?
+    var activeRolePrompt: String?
 }
 
 struct OverviewResponse: Codable {

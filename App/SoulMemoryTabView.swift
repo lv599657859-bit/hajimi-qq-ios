@@ -4,6 +4,7 @@ struct SoulMemoryTabView: View {
     @EnvironmentObject var store: HajimiStore
     @State private var showAddMemorySheet: Bool = false
     @State private var showEditTraitsSheet: Bool = false
+    @State private var showContextInspector: Bool = false
     @State private var isEvolving: Bool = false
 
     var body: some View {
@@ -31,6 +32,10 @@ struct SoulMemoryTabView: View {
                 )
                 .presentationDetents([.medium, .large])
             }
+            .sheet(isPresented: $showContextInspector) {
+                ContextInspectorSheet()
+                    .presentationDetents([.large])
+            }
         }
     }
 
@@ -47,6 +52,19 @@ struct SoulMemoryTabView: View {
                     .font(.system(size: 12.5, weight: .semibold))
                 }
 
+                if !store.evolution.mindFlowActivity.isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        Text("🌊")
+                        Text("此刻心流：\(store.evolution.mindFlowActivity)")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.blue)
+                    }
+                    .padding(9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.blue.opacity(0.08))
+                    .cornerRadius(10)
+                }
+
                 if !store.evolution.currentVibe.isEmpty {
                     Text(store.evolution.currentVibe)
                         .font(.system(size: 13.5))
@@ -55,6 +73,27 @@ struct SoulMemoryTabView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.purple.opacity(0.08))
                         .cornerRadius(10)
+                }
+
+                if !store.evolution.learnedExpressions.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("🗣️ 已吸收的表达默契：")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                ForEach(store.evolution.learnedExpressions, id: \.self) { expr in
+                                    Text(expr)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 4)
+                                        .background(Color.pink.opacity(0.12))
+                                        .foregroundColor(.pink)
+                                        .clipShape(Capsule())
+                                }
+                            }
+                        }
+                    }
                 }
 
                 ForEach(Array(store.evolution.livingTraits.enumerated()), id: \.offset) { _, trait in
@@ -142,6 +181,13 @@ struct SoulMemoryTabView: View {
                 .frame(maxWidth: .infinity, alignment: .center)
             }
             .disabled(isEvolving)
+
+            Button {
+                showContextInspector = true
+            } label: {
+                Label("🕵️ 潜意识上下文透视镜（查看实时注入提示词）", systemImage: "eye.circle")
+                    .font(.system(size: 13.5, weight: .medium))
+            }
         } header: {
             Text("特定周期轻微自我演化（锁死核心直白铁律，仅微调默契与小习惯）")
         }
@@ -236,6 +282,68 @@ struct SoulMemoryTabView: View {
         case "project": return "🛠️ 项目工程"
         case "habit": return "🌙 生活习惯"
         default: return "📌 重要记忆"
+        }
+    }
+}
+
+struct ContextInspectorSheet: View {
+    @EnvironmentObject var store: HajimiStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var preview: ContextPreviewResponse?
+    @State private var isLoading = true
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if isLoading {
+                        HStack {
+                            Spacer()
+                            ProgressView("正在读取电脑端 DSH 实时上下文...")
+                            Spacer()
+                        }
+                        .padding(.top, 40)
+                    } else if let p = preview {
+                        blockCard(title: "🌊 实时心流近况 (MindFlow)", text: p.mindFlow ?? "暂无")
+                        blockCard(title: "🧬 动态演化人设层 (Living Persona)", text: p.livingPersonaBlock ?? "暂无")
+                        blockCard(title: "🧠 跨会话共享记忆注入块 (Shared Memory)", text: p.sharedMemoryBlock ?? "暂无")
+                        blockCard(title: "🔒 核心铁律底盘摘要", text: p.activeRolePrompt ?? "")
+                    } else {
+                        Text("无法读取上下文预览，请确认电脑端 DSH 已升级并保持连接。")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                            .padding()
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("🕵️ 潜意识上下文透视镜")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+            .task {
+                preview = await store.fetchContextPreview()
+                isLoading = false
+            }
+        }
+    }
+
+    private func blockCard(title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 13.5, weight: .bold))
+                .foregroundColor(.blue)
+            Text(text.isEmpty ? "（空）" : text)
+                .font(.system(size: 12.5, design: .monospaced))
+                .foregroundColor(.primary)
+                .textSelection(.enabled)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                .cornerRadius(10)
         }
     }
 }

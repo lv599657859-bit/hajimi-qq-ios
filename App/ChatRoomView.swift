@@ -2,6 +2,12 @@ import SwiftUI
 import UIKit
 import PhotosUI
 
+struct PreviewImageItem: Identifiable {
+    let id = UUID()
+    let url: String
+    let localData: Data?
+}
+
 struct ChatRoomView: View {
     let sessionId: String
     @EnvironmentObject var store: HajimiStore
@@ -12,6 +18,8 @@ struct ChatRoomView: View {
     @State private var showPortraitSheet: Bool = false
     @State private var showQuickTasks: Bool = false
     @State private var pokeAnimatingId: String? = nil
+    @State private var quotingMessage: ChatMessageItem? = nil
+    @State private var viewingImageItem: PreviewImageItem? = nil
 
     private var session: SessionCard {
         store.enabledSessions.first(where: { $0.id == sessionId })
@@ -115,8 +123,21 @@ struct ChatRoomView: View {
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showPortraitSheet) {
-            PortraitMoodSheet(session: session)
-                .presentationDetents([.medium, .large])
+            PortraitMoodSheet(session: session, onPreviewImage: { urlStr in
+                showPortraitSheet = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    viewingImageItem = PreviewImageItem(url: urlStr, localData: nil)
+                }
+            })
+            .presentationDetents([.medium, .large])
+        }
+        .fullScreenCover(item: $viewingImageItem) { item in
+            FullScreenImageViewer(
+                imageUrl: item.url,
+                localData: item.localData,
+                pairKey: store.pairKey,
+                onClose: { viewingImageItem = nil }
+            )
         }
         .onAppear {
             store.activeViewingSessionId = sessionId
@@ -197,7 +218,7 @@ struct ChatRoomView: View {
             ScrollView {
                 LazyVStack(spacing: 14) {
                     if messages.isEmpty && liveStatus == nil {
-                        Text("双击头像可「戳一戳」，顶栏秒切模型与人设，重要信息会自动记入跨会话共享记忆 ✨")
+                        Text("双击头像可「戳一戳」，长按气泡可贴表情 / 引用回复 / 存入记忆 ✨")
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
@@ -223,6 +244,7 @@ struct ChatRoomView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 12)
             }
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: messages.count) { _, _ in
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo("bottom-anchor", anchor: .bottom)
@@ -236,6 +258,7 @@ struct ChatRoomView: View {
 
     @ViewBuilder
     private func messageRowView(_ msg: ChatMessageItem) -> some View {
+        let reactions = store.reactionsByMsgId[msg.id] ?? []
         if msg.kind == "system" {
             Text(msg.text)
                 .font(.system(size: 12))
@@ -248,7 +271,7 @@ struct ChatRoomView: View {
         } else if msg.kind == "user" {
             HStack(alignment: .top, spacing: 9) {
                 Spacer(minLength: 42)
-                VStack(alignment: .trailing, spacing: 3) {
+                VStack(alignment: .trailing, spacing: 4) {
                     Text(myDisplayName)
                         .font(.system(size: 11.5))
                         .foregroundColor(.secondary)
@@ -262,7 +285,6 @@ struct ChatRoomView: View {
                             Text(msg.text)
                                 .font(.system(size: 15.5))
                                 .foregroundColor(.white)
-                                .textSelection(.enabled)
                         }
                     }
                     .padding(.horizontal, 13)
@@ -275,6 +297,13 @@ struct ChatRoomView: View {
                         )
                     )
                     .clipShape(UnevenRoundedRectangle(topLeadingRadius: 16, bottomLeadingRadius: 16, bottomTrailingRadius: 16, topTrailingRadius: 4))
+                    .contextMenu {
+                        bubbleContextMenuItems(msg)
+                    }
+
+                    if !reactions.isEmpty {
+                        reactionBar(msgId: msg.id, reactions: reactions)
+                    }
                 }
 
                 ownerAvatarView
@@ -283,7 +312,7 @@ struct ChatRoomView: View {
             HStack(alignment: .top, spacing: 9) {
                 peerAvatarView(animId: msg.id)
 
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(peerDisplayName)
                         .font(.system(size: 11.5))
                         .foregroundColor(.secondary)
@@ -296,15 +325,83 @@ struct ChatRoomView: View {
                         Text(msg.text)
                             .font(.system(size: 15.5))
                             .foregroundColor(.primary)
-                            .textSelection(.enabled)
                     }
                     .padding(.horizontal, 13)
                     .padding(.vertical, 10)
                     .background(Color(uiColor: .secondarySystemGroupedBackground))
                     .clipShape(UnevenRoundedRectangle(topLeadingRadius: 4, bottomLeadingRadius: 16, bottomTrailingRadius: 16, topTrailingRadius: 16))
                     .shadow(color: Color.black.opacity(0.03), radius: 2, x: 0, y: 1)
+                    .contextMenu {
+                        bubbleContextMenuItems(msg)
+                    }
+
+                    if !reactions.isEmpty {
+                        reactionBar(msgId: msg.id, reactions: reactions)
+                    }
                 }
                 Spacer(minLength: 42)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func bubbleContextMenuItems(_ msg: ChatMessageItem) -> some View {
+        if msg.id != "live-streaming" {
+            Button("❤️ 偏爱") { store.toggleReaction(msgId: msg.id, emoji: "❤️") }
+            Button("😂 笑死") { store.toggleReaction(msgId: msg.id, emoji: "😂") }
+            Button("🥺 抱抱") { store.toggleReaction(msgId: msg.id, emoji: "🥺") }
+            Button("💢 记仇") { store.toggleReaction(msgId: msg.id, emoji: "💢") }
+
+            Divider()
+
+            Button {
+                HapticsHelper.lightTap()
+                quotingMessage = msg
+            } label: {
+                Label("引用回复", systemImage: "arrowshape.turn.up.left")
+            }
+
+            if !msg.text.isEmpty {
+                Button {
+                    Task {
+                        await store.saveMemory(content: msg.text, category: "memory", pinned: false)
+                    }
+                } label: {
+                    Label("存入跨会话共享记忆", systemImage: "brain.head.profile")
+                }
+
+                Button {
+                    UIPasteboard.general.string = msg.text
+                    store.showToast("已复制文字")
+                } label: {
+                    Label("复制文字", systemImage: "doc.on.doc")
+                }
+            }
+
+            if msg.kind == "assistant" {
+                Button {
+                    sendQuick("刚才那句换个更自然直白的说法重说一次")
+                } label: {
+                    Label("让她换个说法重说", systemImage: "arrow.triangle.2.circlepath")
+                }
+            }
+        }
+    }
+
+    private func reactionBar(msgId: String, reactions: [String]) -> some View {
+        HStack(spacing: 4) {
+            ForEach(reactions, id: \.self) { emoji in
+                Button {
+                    store.toggleReaction(msgId: msgId, emoji: emoji)
+                } label: {
+                    Text(emoji)
+                        .font(.system(size: 13))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color.pink.opacity(0.14))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
             }
         }
     }
@@ -368,28 +465,32 @@ struct ChatRoomView: View {
 
     @ViewBuilder
     private func attachmentBubbleImage(_ im: ChatImageAttachment) -> some View {
+        let remoteUrl = store.attachmentUrl(sessionId: sessionId, attachmentId: im.id)
         if let localData = im.localPreviewData, let uiImg = UIImage(data: localData) {
             Image(uiImage: uiImg)
                 .resizable()
                 .scaledToFit()
                 .frame(maxWidth: 210, maxHeight: 240)
                 .cornerRadius(10)
-        } else {
-            let urlStr = store.attachmentUrl(sessionId: sessionId, attachmentId: im.id)
-            if let url = URL(string: urlStr) {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxWidth: 210, maxHeight: 240)
-                            .cornerRadius(10)
-                    } else {
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color.secondary.opacity(0.15))
-                            .frame(width: 140, height: 100)
-                            .overlay(ProgressView())
-                    }
+                .onTapGesture {
+                    viewingImageItem = PreviewImageItem(url: remoteUrl, localData: localData)
+                }
+        } else if let url = URL(string: remoteUrl) {
+            AsyncImage(url: url) { phase in
+                if let image = phase.image {
+                    image
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 210, maxHeight: 240)
+                        .cornerRadius(10)
+                        .onTapGesture {
+                            viewingImageItem = PreviewImageItem(url: remoteUrl, localData: nil)
+                        }
+                } else {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.secondary.opacity(0.15))
+                        .frame(width: 140, height: 100)
+                        .overlay(ProgressView())
                 }
             }
         }
@@ -421,6 +522,36 @@ struct ChatRoomView: View {
 
     private var composerBar: some View {
         VStack(spacing: 8) {
+            if let q = quotingMessage {
+                HStack(spacing: 8) {
+                    Rectangle()
+                        .fill(Color.blue)
+                        .frame(width: 3, height: 28)
+                        .clipShape(Capsule())
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("引用 \(q.kind == "user" ? myDisplayName : store.profile.hajimiName)")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.blue)
+                        Text(q.text.isEmpty ? "[图片]" : q.text)
+                            .font(.system(size: 12.5))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button {
+                        quotingMessage = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                .cornerRadius(10)
+                .padding(.horizontal, 10)
+            }
+
             if !pendingImageData.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -478,9 +609,14 @@ struct ChatRoomView: View {
                     .cornerRadius(18)
 
                 Button {
-                    let txt = draftText
+                    var txt = draftText
+                    if let q = quotingMessage {
+                        let snippet = String((q.text.isEmpty ? "[图片]" : q.text).prefix(60)).replacingOccurrences(of: "\n", with: " ")
+                        txt = "「引用：\(snippet)」\n\(txt)"
+                    }
                     let imgs = pendingImageData
                     draftText = ""
+                    quotingMessage = nil
                     pendingImageData.removeAll()
                     showQuickTasks = false
                     Task {
@@ -618,6 +754,7 @@ struct ModelSwitcherSheet: View {
 
 struct PortraitMoodSheet: View {
     let session: SessionCard
+    var onPreviewImage: ((String) -> Void)? = nil
     @EnvironmentObject var store: HajimiStore
     @Environment(\.dismiss) private var dismiss
 
@@ -632,6 +769,9 @@ struct PortraitMoodSheet: View {
                                 .scaledToFit()
                                 .frame(maxHeight: 360)
                                 .cornerRadius(16)
+                                .onTapGesture {
+                                    onPreviewImage?(store.portraitFullUrl)
+                                }
                         } else {
                             RoundedRectangle(cornerRadius: 16)
                                 .fill(Color.secondary.opacity(0.12))
@@ -639,6 +779,19 @@ struct PortraitMoodSheet: View {
                                 .overlay(ProgressView())
                         }
                     }
+                }
+
+                if !store.evolution.mindFlowActivity.isEmpty {
+                    HStack(spacing: 6) {
+                        Text("🌊 心流：\(store.evolution.mindFlowActivity)")
+                            .font(.system(size: 12.5))
+                            .foregroundColor(.purple)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.purple.opacity(0.08))
+                    .cornerRadius(10)
                 }
 
                 HStack {
