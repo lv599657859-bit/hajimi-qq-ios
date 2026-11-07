@@ -30,8 +30,8 @@ targets:
       path: App/Resources/Info.plist
       properties:
         CFBundleDisplayName: 哈基米QQ
-        CFBundleShortVersionString: "3.1.1"
-        CFBundleVersion: "7"
+        CFBundleShortVersionString: "3.3.0"
+        CFBundleVersion: "9"
         UIBackgroundModes:
           - audio
           - fetch

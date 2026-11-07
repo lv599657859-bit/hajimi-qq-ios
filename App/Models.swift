@@ -361,15 +361,17 @@ struct ChatImageAttachment: Codable, Equatable, Identifiable {
 
 struct ChatMessageItem: Codable, Identifiable, Equatable {
     var id: String
+    var turnId: String?
     var kind: String // "user" | "assistant" | "system"
     var text: String
     var innerThought: String
     var images: [ChatImageAttachment]
 
-    enum CodingKeys: String, CodingKey { case id, kind, text, innerThought, images }
+    enum CodingKeys: String, CodingKey { case id, turnId, kind, text, innerThought, images }
 
-    init(id: String = UUID().uuidString, kind: String, text: String, innerThought: String = "", images: [ChatImageAttachment] = []) {
+    init(id: String = UUID().uuidString, turnId: String? = nil, kind: String, text: String, innerThought: String = "", images: [ChatImageAttachment] = []) {
         self.id = id
+        self.turnId = turnId
         self.kind = kind
         self.text = text
         self.innerThought = innerThought
@@ -379,6 +381,7 @@ struct ChatMessageItem: Codable, Identifiable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = (try? c.decode(String.self, forKey: .id)) ?? UUID().uuidString
+        turnId = try? c.decode(String.self, forKey: .turnId)
         kind = (try? c.decode(String.self, forKey: .kind)) ?? "assistant"
         text = (try? c.decode(String.self, forKey: .text)) ?? ""
         innerThought = (try? c.decode(String.self, forKey: .innerThought)) ?? ""
@@ -507,10 +510,69 @@ struct ContextPreviewResponse: Codable {
     var activeRolePrompt: String?
 }
 
+struct TtsVoiceItem: Codable, Identifiable, Equatable {
+    var id: String
+    var name: String
+    var badge: String
+    var engine: String?
+    var sampleText: String?
+
+    enum CodingKeys: String, CodingKey { case id, name, badge, engine, sampleText }
+
+    init(id: String, name: String, badge: String = "", engine: String? = nil, sampleText: String? = nil) {
+        self.id = id
+        self.name = name
+        self.badge = badge
+        self.engine = engine
+        self.sampleText = sampleText
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? "qianxia"
+        name = (try? c.decode(String.self, forKey: .name)) ?? id
+        badge = (try? c.decode(String.self, forKey: .badge)) ?? ""
+        engine = try? c.decode(String.self, forKey: .engine)
+        sampleText = try? c.decode(String.self, forKey: .sampleText)
+    }
+}
+
+struct TtsConfigInfo: Codable, Equatable {
+    var selectedVoiceId: String = "qianxia"
+    var autoRead: Bool = false
+
+    init() {}
+
+    enum CodingKeys: String, CodingKey { case selectedVoiceId, autoRead }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        selectedVoiceId = (try? c.decode(String.self, forKey: .selectedVoiceId)) ?? "qianxia"
+        autoRead = (try? c.decode(Bool.self, forKey: .autoRead)) ?? false
+    }
+}
+
+struct TtsOverviewBundle: Codable, Equatable {
+    var ok: Bool?
+    var config: TtsConfigInfo?
+    var voices: [TtsVoiceItem]?
+}
+
+struct TtsSpeakResponse: Codable {
+    var ok: Bool?
+    var audioUrl: String?
+    var voiceId: String?
+    var voiceName: String?
+    var provider: String?
+    var spokenText: String?
+    var error: String?
+}
+
 struct OverviewResponse: Codable {
     var ok: Bool?
     var profile: UserAndPeerProfile?
     var telemetry: SoulTelemetry?
+    var tts: TtsOverviewBundle?
     var enabledSessions: [SessionCard]?
     var otherSessions: [OtherSessionItem]?
 }

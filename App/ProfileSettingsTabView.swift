@@ -191,6 +191,52 @@ struct ProfileSettingsTabView: View {
                     }
                 }
 
+                Section("🔊 AI娘二创与百炼语音合成（支持服务端热更新）") {
+                    if !store.ttsVoices.isEmpty {
+                        Picker(
+                            "默认语音音色",
+                            selection: Binding(
+                                get: { store.ttsConfig.selectedVoiceId },
+                                set: { newVid in
+                                    Task { await store.selectTtsVoice(voiceId: newVid) }
+                                }
+                            )
+                        ) {
+                            ForEach(store.ttsVoices) { v in
+                                Text("\(v.name) · \(v.badge)").tag(v.id)
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 12) {
+                        if let curVoice = store.ttsVoices.first(where: { $0.id == store.ttsConfig.selectedVoiceId }) ?? store.ttsVoices.first {
+                            Button {
+                                Task {
+                                    await store.previewTtsVoice(voice: curVoice)
+                                }
+                            } label: {
+                                Label(
+                                    store.ttsLoadingMessageId == "preview-\(curVoice.id)"
+                                        ? "正在合成试听语音..."
+                                        : "🔊 试听当前选中音色（\(curVoice.name)）",
+                                    systemImage: "play.circle.fill"
+                                )
+                                .font(.system(size: 13.5, weight: .semibold))
+                                .foregroundColor(.pink)
+                            }
+                        }
+                    }
+
+                    Button {
+                        Task {
+                            await store.loadTtsVoices(showSuccessToast: true)
+                        }
+                    } label: {
+                        Label("🔄 从电脑端热更新最新音色列表", systemImage: "arrow.clockwise")
+                            .font(.system(size: 13.5, weight: .medium))
+                    }
+                }
+
                 Section("📡 电脑端 DSH 热点 / Wi-Fi 连接") {
                     HStack {
                         Text("当前状态")

@@ -16,6 +16,7 @@ struct ChatRoomView: View {
     @State private var pendingImageData: [Data] = []
     @State private var showModelSheet: Bool = false
     @State private var showPortraitSheet: Bool = false
+    @State private var showVoiceSheet: Bool = false
     @State private var showQuickTasks: Bool = false
     @State private var pokeAnimatingId: String? = nil
     @State private var quotingMessage: ChatMessageItem? = nil
@@ -131,6 +132,10 @@ struct ChatRoomView: View {
             ModelSwitcherSheet(session: session)
                 .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $showVoiceSheet) {
+            TtsVoiceGallerySheet(roleId: session.roleId)
+                .presentationDetents([.medium, .large])
+        }
         .sheet(isPresented: $showPortraitSheet) {
             PortraitMoodSheet(session: session, onPreviewImage: { urlStr in
                 showPortraitSheet = false
@@ -212,6 +217,68 @@ struct ChatRoomView: View {
                     .clipShape(Capsule())
                 }
                 .disabled(store.isForkingSession)
+
+                Menu {
+                    Button {
+                        showVoiceSheet = true
+                    } label: {
+                        Label("🎧 打开 AI娘音色试听间（可热更新）", systemImage: "headphones")
+                    }
+                    if let curVoice = store.ttsVoices.first(where: { $0.id == store.ttsConfig.selectedVoiceId }) ?? store.ttsVoices.first {
+                        Button {
+                            Task {
+                                await store.previewTtsVoice(voice: curVoice, roleId: session.roleId)
+                            }
+                        } label: {
+                            Label("🔊 试听当前音色（\(curVoice.name)）", systemImage: "play.circle.fill")
+                        }
+                    }
+                    Button {
+                        Task {
+                            await store.loadTtsVoices(showSuccessToast: true)
+                        }
+                    } label: {
+                        Label("🔄 刷新服务端音色列表", systemImage: "arrow.clockwise")
+                    }
+                    if store.ttsPlayingMessageId != nil {
+                        Button(role: .destructive) {
+                            store.stopTtsPlayback()
+                        } label: {
+                            Label("⏹ 停止当前语音播放", systemImage: "stop.circle.fill")
+                        }
+                    }
+                    Divider()
+                    ForEach(store.ttsVoices) { v in
+                        Button {
+                            Task {
+                                await store.selectTtsVoice(voiceId: v.id)
+                            }
+                        } label: {
+                            HStack {
+                                Text("\(v.name) · \(v.badge)")
+                                if v.id == store.ttsConfig.selectedVoiceId {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    let currentVoiceName = store.ttsVoices.first(where: { $0.id == store.ttsConfig.selectedVoiceId })?.name ?? "AI娘音色"
+                    HStack(spacing: 4) {
+                        Image(systemName: "speaker.wave.2.fill")
+                            .font(.system(size: 10))
+                        Text(currentVoiceName)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8.5, weight: .bold))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.pink.opacity(0.13))
+                    .foregroundColor(.pink)
+                    .clipShape(Capsule())
+                }
 
                 Divider().frame(height: 14)
 
@@ -422,6 +489,40 @@ struct ChatRoomView: View {
                             }
                             .buttonStyle(.plain)
                         }
+
+                        if msg.id != "live-streaming" && !msg.text.isEmpty {
+                            let isLoadingTts = (store.ttsLoadingMessageId == msg.id)
+                            let isPlayingTts = (store.ttsPlayingMessageId == msg.id)
+                            Button {
+                                Task {
+                                    await store.speakMessage(
+                                        messageId: msg.id,
+                                        text: msg.text,
+                                        roleId: session.roleId
+                                    )
+                                }
+                            } label: {
+                                HStack(spacing: 3) {
+                                    if isLoadingTts {
+                                        ProgressView()
+                                            .scaleEffect(0.55)
+                                            .frame(width: 11, height: 11)
+                                    } else {
+                                        Image(systemName: isPlayingTts ? "stop.fill" : "speaker.wave.2.fill")
+                                            .font(.system(size: 9.5, weight: .bold))
+                                    }
+                                    Text(isLoadingTts ? "合成中" : (isPlayingTts ? "停止" : "听语音"))
+                                        .font(.system(size: 10.5, weight: .semibold))
+                                }
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(isPlayingTts ? Color.pink.opacity(0.24) : Color.blue.opacity(0.11))
+                                .foregroundColor(isPlayingTts ? .pink : .blue)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isLoadingTts)
+                        }
                     }
 
                     if showThought {
@@ -536,10 +637,36 @@ struct ChatRoomView: View {
 
             if msg.kind == "assistant" {
                 Button {
+                    Task {
+                        await store.speakMessage(
+                            messageId: msg.id,
+                            text: msg.text,
+                            roleId: session.roleId
+                        )
+                    }
+                } label: {
+                    Label("🔊 用 AI娘语音朗读此条", systemImage: "speaker.wave.2.fill")
+                }
+
+                Button {
                     sendQuick("刚才那句换个更自然直白的说法重说一次")
                 } label: {
                     Label("让她换个说法重说", systemImage: "arrow.triangle.2.circlepath")
                 }
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                Task {
+                    await store.deleteTurn(
+                        sessionId: sessionId,
+                        messageId: msg.id,
+                        turnId: msg.turnId
+                    )
+                }
+            } label: {
+                Label("删除这一轮对话（含上下文）", systemImage: "trash")
             }
         }
     }
@@ -1040,6 +1167,160 @@ struct PortraitMoodSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("关闭") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+struct TtsVoiceGallerySheet: View {
+    let roleId: String
+    @EnvironmentObject var store: HajimiStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var customSampleText: String = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("✨ 自定义试听台词（留空则用各音色专属台词）") {
+                    HStack(spacing: 8) {
+                        TextField("输入你想让 AI娘朗读的试听句子...", text: $customSampleText)
+                            .font(.system(size: 14))
+                        if !customSampleText.isEmpty {
+                            Button {
+                                customSampleText = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    HStack(spacing: 10) {
+                        Button {
+                            Task {
+                                await store.loadTtsVoices(showSuccessToast: true)
+                            }
+                        } label: {
+                            Label("🔄 热更新服务端音色列表", systemImage: "arrow.clockwise")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        Spacer()
+                        if store.ttsPlayingMessageId != nil {
+                            Button(role: .destructive) {
+                                store.stopTtsPlayback()
+                            } label: {
+                                Label("⏹ 停止播放", systemImage: "stop.circle.fill")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                        }
+                    }
+                }
+
+                Section("🎧 服务端已注册音色（共 \(store.ttsVoices.count) 款 · 切换即全局生效）") {
+                    ForEach(store.ttsVoices) { voice in
+                        let isSelected = (voice.id == store.ttsConfig.selectedVoiceId)
+                        let previewMsgId = "sheet-preview-\(voice.id)"
+                        let isLoading = (store.ttsLoadingMessageId == previewMsgId || store.ttsLoadingMessageId == "preview-\(voice.id)")
+                        let isPlaying = (store.ttsPlayingMessageId == previewMsgId || store.ttsPlayingMessageId == "preview-\(voice.id)")
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(alignment: .center, spacing: 10) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(spacing: 6) {
+                                        Text(voice.name)
+                                            .font(.system(size: 15, weight: .bold))
+                                            .foregroundColor(isSelected ? .pink : .primary)
+                                        if isSelected {
+                                            Text("当前使用")
+                                                .font(.system(size: 10.5, weight: .bold))
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(Color.pink.opacity(0.18))
+                                                .foregroundColor(.pink)
+                                                .clipShape(Capsule())
+                                        }
+                                    }
+                                    if !voice.badge.isEmpty {
+                                        Text(voice.badge)
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+
+                                Spacer()
+
+                                Button {
+                                    let textToSpeak = customSampleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                        ? (voice.sampleText ?? "老公，我是你的专属猫娘哈基米，来听听这个音色喜不喜欢呀～")
+                                        : customSampleText.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    Task {
+                                        await store.speakMessage(
+                                            messageId: previewMsgId,
+                                            text: textToSpeak,
+                                            roleId: roleId,
+                                            voiceId: voice.id
+                                        )
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        if isLoading {
+                                            ProgressView()
+                                                .scaleEffect(0.7)
+                                                .frame(width: 14, height: 14)
+                                        } else {
+                                            Image(systemName: isPlaying ? "stop.fill" : "play.fill")
+                                                .font(.system(size: 11, weight: .bold))
+                                        }
+                                        Text(isLoading ? "合成中" : (isPlaying ? "停止" : "试听"))
+                                            .font(.system(size: 12.5, weight: .semibold))
+                                    }
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 6)
+                                    .background(isPlaying ? Color.pink : Color.blue.opacity(0.14))
+                                    .foregroundColor(isPlaying ? .white : .blue)
+                                    .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(isLoading)
+
+                                Button {
+                                    Task {
+                                        await store.selectTtsVoice(voiceId: voice.id)
+                                    }
+                                } label: {
+                                    Text(isSelected ? "已选" : "选用")
+                                        .font(.system(size: 12.5, weight: .bold))
+                                        .padding(.horizontal, 11)
+                                        .padding(.vertical, 6)
+                                        .background(isSelected ? Color.pink.opacity(0.18) : Color(uiColor: .secondarySystemFill))
+                                        .foregroundColor(isSelected ? .pink : .primary)
+                                        .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            if let sample = voice.sampleText, !sample.isEmpty {
+                                Text("「\(sample)」")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            .navigationTitle("🎧 AI娘音色试听间")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { dismiss() }
+                }
+            }
+            .onAppear {
+                Task {
+                    await store.loadTtsVoices(showSuccessToast: false)
                 }
             }
         }

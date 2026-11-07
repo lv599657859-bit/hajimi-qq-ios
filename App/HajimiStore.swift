@@ -3,6 +3,7 @@ import SwiftUI
 import UIKit
 import Network
 import Darwin
+import AVFoundation
 
 struct LiveStreamingStatus: Equatable {
     var text: String = ""
@@ -32,6 +33,10 @@ final class HajimiStore: ObservableObject {
     @Published var isForkingSession: Bool = false
     @Published var backgroundKeepAliveEnabled: Bool = true
     @Published var backgroundNotifyEnabled: Bool = true
+    @Published var ttsVoices: [TtsVoiceItem] = []
+    @Published var ttsConfig: TtsConfigInfo = TtsConfigInfo()
+    @Published var ttsLoadingMessageId: String? = nil
+    @Published var ttsPlayingMessageId: String? = nil
 
     var activeViewingSessionId: String? = nil
     var bootstrapFallbackUrls: [String] = []
@@ -40,6 +45,8 @@ final class HajimiStore: ObservableObject {
     private var watchdogTask: Task<Void, Never>? = nil
     private var toastTask: Task<Void, Never>? = nil
     private var liveClearTasks: [String: Task<Void, Never>] = [:]
+    private var deletingTurnSessions: Set<String> = []
+    private var audioPlayer: AVAudioPlayer? = nil
     private var sseGeneration: UInt64 = 0
     private var isSseStreamingActive: Bool = false
     private var lastSseFrameAt: Date = .distantPast
@@ -505,6 +512,7 @@ final class HajimiStore: ObservableObject {
             group.addTask { await self.loadMemories() }
             group.addTask { await self.loadEvolution() }
             group.addTask { await self.loadSoulState() }
+            group.addTask { await self.loadTtsVoices() }
         }
     }
 
@@ -517,6 +525,10 @@ final class HajimiStore: ObservableObject {
                 self.isConnected = true
                 if let prof = decoded.profile { self.profile = prof }
                 if let tel = decoded.telemetry { self.telemetry = tel }
+                if let tts = decoded.tts {
+                    if let cfg = tts.config { self.ttsConfig = cfg }
+                    if let vcs = tts.voices, !vcs.isEmpty { self.ttsVoices = vcs }
+                }
                 if let en = decoded.enabledSessions { self.enabledSessions = en }
                 if let ot = decoded.otherSessions { self.otherSessions = ot }
             } else if let http = resp as? HTTPURLResponse, http.statusCode == 401 {
@@ -525,6 +537,23 @@ final class HajimiStore: ObservableObject {
         } catch {
             if !self.isSseStreamingActive {
                 self.isConnected = false
+            }
+        }
+    }
+
+    func loadTtsVoices(showSuccessToast: Bool = false) async {
+        do {
+            let data = try await authedData(path: "/api/ios/tts/voices", timeout: 10)
+            if let dec = try? JSONDecoder().decode(TtsOverviewBundle.self, from: data) {
+                if let cfg = dec.config { self.ttsConfig = cfg }
+                if let vcs = dec.voices, !vcs.isEmpty { self.ttsVoices = vcs }
+                if showSuccessToast {
+                    showToast("🔊 已热更新 \(self.ttsVoices.count) 款服务端音色！")
+                }
+            }
+        } catch {
+            if showSuccessToast {
+                showToast("获取音色列表失败，请检查电脑连接")
             }
         }
     }
@@ -746,6 +775,154 @@ final class HajimiStore: ObservableObject {
             _ = try await URLSession.shared.data(for: req)
             await loadOverview()
         } catch {}
+    }
+
+    // MARK: - SoulOS v3.3 Single-Turn True Context Deletion
+    func deleteTurn(sessionId: String, messageId: String, turnId: String? = nil) async {
+        guard !deletingTurnSessions.contains(sessionId) else { return }
+        deletingTurnSessions.insert(sessionId)
+        defer { deletingTurnSessions.remove(sessionId) }
+        HapticsHelper.lightTap()
+
+        let previousMessages = messagesBySession[sessionId] ?? []
+        if let tid = turnId, !tid.isEmpty {
+            messagesBySession[sessionId] = previousMessages.filter { $0.turnId != tid && $0.id != messageId }
+        } else {
+            messagesBySession[sessionId] = previousMessages.filter { $0.id != messageId }
+        }
+
+        var body: [String: Any] = [
+            "sessionId": sessionId,
+            "messageId": messageId
+        ]
+        if let tid = turnId, !tid.isEmpty {
+            body["turnId"] = tid
+        }
+
+        do {
+            let data = try await authedData(path: "/api/ios/messages/delete-turn", method: "POST", jsonBody: body, timeout: 25)
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let msgsArr = obj["messages"],
+               let msgsData = try? JSONSerialization.data(withJSONObject: msgsArr),
+               let decodedMsgs = try? JSONDecoder().decode([ChatMessageItem].self, from: msgsData) {
+                messagesBySession[sessionId] = Self.sanitizeChatMessages(decodedMsgs)
+            } else {
+                await loadHistory(sessionId: sessionId)
+            }
+            await loadOverview()
+            showToast("🗑️ 已从上下文与历史中移除该轮对话")
+        } catch {
+            messagesBySession[sessionId] = previousMessages
+            showToast("删除对话轮次失败，请确认当前无正在生成的回复")
+        }
+    }
+
+    // MARK: - SoulOS v3.3 AI Girl Voice Synthesis & Hot-Reloadable Audition
+    func selectTtsVoice(voiceId: String) async {
+        HapticsHelper.lightTap()
+        self.ttsConfig.selectedVoiceId = voiceId
+        do {
+            let data = try await authedData(
+                path: "/api/ios/tts/config",
+                method: "POST",
+                jsonBody: ["selectedVoiceId": voiceId],
+                timeout: 12
+            )
+            if let dec = try? JSONDecoder().decode(TtsOverviewBundle.self, from: data) {
+                if let cfg = dec.config { self.ttsConfig = cfg }
+                if let vcs = dec.voices, !vcs.isEmpty { self.ttsVoices = vcs }
+            }
+            let voiceName = ttsVoices.first(where: { $0.id == voiceId })?.name ?? voiceId
+            showToast("🔊 已切换语音音色：\(voiceName)")
+        } catch {
+            showToast("切换音色失败")
+        }
+    }
+
+    func previewTtsVoice(voice: TtsVoiceItem, roleId: String = "girlfriend") async {
+        let sample = voice.sampleText ?? "老公，我是你的猫娘哈基米，今天也要乖乖听我说话哦～"
+        await speakMessage(
+            messageId: "preview-\(voice.id)",
+            text: sample,
+            roleId: roleId,
+            voiceId: voice.id
+        )
+    }
+
+    func speakMessage(messageId: String, text: String, roleId: String = "girlfriend", voiceId: String? = nil) async {
+        HapticsHelper.lightTap()
+        if ttsPlayingMessageId == messageId {
+            stopTtsPlayback()
+            return
+        }
+        stopTtsPlayback()
+        ttsLoadingMessageId = messageId
+
+        var body: [String: Any] = [
+            "text": text,
+            "roleId": roleId
+        ]
+        if let v = voiceId, !v.isEmpty {
+            body["voiceId"] = v
+        } else if !ttsConfig.selectedVoiceId.isEmpty {
+            body["voiceId"] = ttsConfig.selectedVoiceId
+        }
+
+        do {
+            let data = try await authedData(path: "/api/ios/tts/speak", method: "POST", jsonBody: body, timeout: 35)
+            guard let dec = try? JSONDecoder().decode(TtsSpeakResponse.self, from: data),
+                  dec.ok == true,
+                  let relUrl = dec.audioUrl, !relUrl.isEmpty else {
+                ttsLoadingMessageId = nil
+                showToast("语音合成失败")
+                return
+            }
+            let fullUrlStr = relUrl.hasPrefix("http") ? relUrl : "\(serverUrl)\(relUrl)"
+            guard let audioUrl = URL(string: fullUrlStr) else {
+                ttsLoadingMessageId = nil
+                return
+            }
+            var audioReq = URLRequest(url: audioUrl)
+            if !pairKey.isEmpty {
+                audioReq.setValue(pairKey, forHTTPHeaderField: "x-hajimi-key")
+            }
+            let (audioData, resp) = try await apiUrlSession.data(for: audioReq)
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200, !audioData.isEmpty else {
+                ttsLoadingMessageId = nil
+                showToast("语音音频下载失败")
+                return
+            }
+
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try? AVAudioSession.sharedInstance().setActive(true)
+            let player = try AVAudioPlayer(data: audioData)
+            player.prepareToPlay()
+            self.audioPlayer = player
+            self.ttsLoadingMessageId = nil
+            self.ttsPlayingMessageId = messageId
+            player.play()
+            let vName = dec.voiceName ?? "AI娘语音"
+            showToast("🔊 正在播放：\(vName)")
+
+            let durationNs = UInt64(max(0.8, player.duration + 0.25) * 1_000_000_000)
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: durationNs)
+                guard let self = self else { return }
+                if self.ttsPlayingMessageId == messageId && (self.audioPlayer?.isPlaying != true) {
+                    self.ttsPlayingMessageId = nil
+                }
+            }
+        } catch {
+            ttsLoadingMessageId = nil
+            showToast("语音合成请求超时或失败")
+        }
+    }
+
+    func stopTtsPlayback() {
+        audioPlayer?.stop()
+        audioPlayer = nil
+        ttsPlayingMessageId = nil
+        ttsLoadingMessageId = nil
     }
 
     // MARK: - Shared Memory CRUD
@@ -1163,11 +1340,16 @@ final class HajimiStore: ObservableObject {
             if let ov = try? JSONDecoder().decode(OverviewResponse.self, from: data) {
                 if let prof = ov.profile { self.profile = prof }
                 if let tel = ov.telemetry { self.telemetry = tel }
+                if let tts = ov.tts {
+                    if let cfg = tts.config { self.ttsConfig = cfg }
+                    if let vcs = tts.voices, !vcs.isEmpty { self.ttsVoices = vcs }
+                }
                 if let en = ov.enabledSessions { self.enabledSessions = en }
                 if let ot = ov.otherSessions { self.otherSessions = ot }
             }
             if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let sid = obj["sessionId"] as? String,
+               !deletingTurnSessions.contains(sid),
                let msgsArr = obj["messages"],
                let msgsData = try? JSONSerialization.data(withJSONObject: msgsArr),
                let decodedMsgs = try? JSONDecoder().decode([ChatMessageItem].self, from: msgsData) {
